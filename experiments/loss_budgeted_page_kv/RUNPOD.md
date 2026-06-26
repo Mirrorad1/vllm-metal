@@ -9,18 +9,19 @@ Validated locally on CPU (transformers 5.12.1, torch 2.11): the correctness gate
 exactly (`full-keep vs causal max|Δ| = 0.00e+00`; tight = 15.2). The same gate re-runs on
 the GPU before any result — if it ever FAILs, stop (the mask is wrong, numbers meaningless).
 
-## Pod & sizing (IMPORTANT — eager attention is O(heads·L²))
-`--n-filler` counts filler SENTENCES (~14 tokens each), so context = roughly n_filler·14:
-`150→2.1k, 250→3.5k, 400→5.5k, 600→8.2k, 1500→20k, 3000→41k` tokens. The eager softmax
-score matrix is `heads·L²·4 bytes` per layer (transient) — this is the binding limit, NOT
-the weights. **Keep context modest.** Tested-safe on H100 80 GB:
-  - 7B: `--n-filler 400` (~5.5k) solid; up to `--n-filler 600` (~8k) with expandable_segments.
-  - 14B: `--n-filler 250` (~3.5k); ~`400` (~5.5k) max.
-  - `--n-filler 1500/3000` (20k/41k) **OOMs even on 80 GB** in eager — needs the sdpa/cache
-    rewrite (ask; not in this version).
-Always set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Even 5–8k context at
-7B/14B on harder tasks is far past the local Mac and enough to validate the hypothesis.
-Standard RunPod "PyTorch 2.x / CUDA 12.x" template; no special build flags.
+## Pod & sizing (this version is MEMORY-EFFICIENT — sdpa, not eager)
+This version runs the big forwards under sdpa (fused mem-efficient backend) + a 4D mask +
+`logits_to_keep`, so it does NOT materialize the O(L²) score matrix or O(L·vocab) logits
+(see SPEC_exp020_memeff.md). The only O(L²) object is the additive mask tensor
+(~3.4 GB bf16 @41k) — fine on 80 GB. So **long context now works**:
+`--n-filler`: `150→2.1k, 400→5.5k, 600→8.2k, 1500→20k, 3000→41k` tokens.
+  - 7B: `--n-filler 1500` (~20k) and `3000` (~41k) fit comfortably on an H100 80 GB.
+  - 14B: `--n-filler 1500` (~20k) fits; `3000` (~41k) is tight but should fit.
+Always set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+**If you still OOM**, it means PyTorch picked the MATH sdpa backend for the custom mask
+(the `[gate]` line would print, then OOM on the first long forward) — tell me and I'll
+ship the v3 cache-slicing variant (no mask tensor at all). Standard RunPod
+"PyTorch 2.x / CUDA 12.x" template; no special build flags.
 
 ## Setup
 ```bash
@@ -33,15 +34,17 @@ export HF_HOME=/workspace/hf            # persist the model cache on the pod vol
 
 ## Run
 ```bash
-# 7B, ~3.5k context, all 5 task families, 30 valid examples each:
-HF_HOME=/workspace/hf python exp020_quality_cuda.py \
-  --model Qwen/Qwen2.5-7B-Instruct --n 30 --n-filler 300 --block-size 16
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# longer context (needs a bigger card):
-python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 20 --n-filler 1200
+# 1. quick sanity (gate must PASS):
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 5 --n-filler 400
 
-# bigger model if the card allows:
-python exp020_quality_cuda.py --model Qwen/Qwen2.5-14B-Instruct --n 20 --n-filler 300
+# 2. the real validation: 7B @ ~20k context, all 5 task families:
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler 1500 --block-size 16
+
+# 3. push to ~41k context, and/or a bigger model on the same H100:
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct  --n 30 --n-filler 3000
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-14B-Instruct --n 30 --n-filler 1500
 ```
 
 ## What to read

@@ -1,30 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
-"""exp020 (CUDA/transformers port) — budget-vs-quality on harder long-context tasks.
+"""exp020 (CUDA/transformers, memory-efficient) — budget-vs-quality on harder tasks.
 
-Self-contained PyTorch/transformers port of exp020_quality.py for a RunPod (CUDA)
-GPU box — the MLX harness is Apple-Metal-only. Measures the iso-quality KV budget
-for the DEPLOYABLE selector (attention-mass / recent) on progressively harder
-RULER/NIAH-style tasks, at 7B+ scale and longer context than the local Mac allows.
+Self-contained PyTorch/transformers port of exp020_quality.py for a GPU box (the MLX
+harness is Apple-Metal-only). Measures the iso-quality KV budget for the DEPLOYABLE
+selector (attention-mass / recent) on progressively harder RULER/NIAH-style tasks,
+at 7B+ scale and LONG context.
 
-Mechanism: page-gating via a 4D ADDITIVE attention mask (causal everywhere; for the
-ANSWER-query rows, block attention to keys in dropped pages). No KV-cache surgery,
-no custom-attention registration, no position-id traps. `attn_implementation="eager"`
-so output_attentions gives the per-page attention mass that drives the selector.
+Memory-efficient design (see SPEC_exp020_memeff.md): the big quality forwards run on
+**sdpa (mem-efficient/flash backend forced)** with a 4D additive page-gating mask and
+`logits_to_keep`, so neither the O(L²) score matrix nor the O(L·vocab) logits are
+materialized → scales to 16k–41k context on one 80 GB GPU. The per-page attention-mass
+selector is captured by momentarily switching to `eager` for a single O(L) one-token
+forward (sdpa can't return attentions).
 
-CORRECTNESS GATE (run first, abort on fail — see hf-custom-attention-transplant):
-  * full budget (no pages dropped) gated logits == plain causal logits  (max|Δ| < 1e-3, fp32)
-  * tight budget gated logits materially differ                          (max|Δ| > 1e-2)
-A subtly-wrong mask produces plausible logits, so you'd measure a bug, not the idea.
+CORRECTNESS GATE (run first, fp32, abort on fail — hf-custom-attention-transplant):
+  * full budget (drop nothing) gated logits == plain causal   (max|Δ| < 1e-3)
+  * tight budget gated logits materially differ               (max|Δ| > 1e-2)
 
-Run:
-  pip install "torch" "transformers>=4.44" accelerate
-  HF_HOME=/workspace/hf python exp020_quality_cuda.py \
-      --model Qwen/Qwen2.5-7B-Instruct --n 30 --n-filler 300 --block-size 16
-See RUNPOD.md.
+Run (see RUNPOD.md):
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  pip install "torch" "transformers>=5.0" accelerate numpy
+  python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler 1500
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import random
 import time
@@ -32,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # ---------------------------------------------------------------------------
@@ -81,67 +83,78 @@ def make_task(family, seed, n_filler):
 
 
 FAMILIES = ["single_needle", "exact_long_string", "multi_needle", "multi_hop", "distractor"]
-NEG = None  # set per-dtype
 
 
-def build_mask(L, prompt_len, dropped_key_positions, dtype, device):
-    """4D additive mask [1,1,L,L]: causal everywhere; ANSWER-query rows (>=prompt_len)
-    additionally blocked from the dropped key positions (prompt prefill stays lossless)."""
-    neg = torch.finfo(dtype).min
-    m = torch.zeros((L, L), dtype=dtype, device=device)
-    m.masked_fill_(torch.triu(torch.ones(L, L, dtype=torch.bool, device=device), diagonal=1), neg)
-    if dropped_key_positions:
-        drop = torch.tensor(sorted(dropped_key_positions), device=device, dtype=torch.long)
-        m[prompt_len:, drop] = neg  # answer rows can't see dropped prompt pages
-    return m[None, None]
-
-
-@torch.no_grad()
-def forward_logits(model, ids, mask4d, want_attn=False):
-    out = model(input_ids=ids, attention_mask=mask4d, output_attentions=want_attn, use_cache=False)
-    return out.logits, (out.attentions if want_attn else None)
+# ---------------------------------------------------------------------------
+# memory-efficient forward primitives
+# ---------------------------------------------------------------------------
+def _sdpa_ctx(device):
+    # force the fused backends on GPU so a custom float mask can't silently fall back to
+    # the MATH backend (which re-materializes O(L²) and OOMs). No-op on CPU.
+    if device == "cuda":
+        return sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.FLASH_ATTENTION])
+    return contextlib.nullcontext()
 
 
 def page_of(pos, block_size):
     return pos // block_size
 
 
-def exact_answer_ok(logits, prompt_len, answer_ids):
-    # logits at position prompt_len-1+t predicts answer token t
+def build_mask(L, prompt_len, dropped_key_positions, dtype, device):
+    """4D additive mask [1,1,L,L]: causal everywhere; ANSWER-query rows (>=prompt_len)
+    additionally blocked from the dropped key positions (prefill stays lossless)."""
+    neg = torch.finfo(dtype).min
+    m = torch.zeros((L, L), dtype=dtype, device=device)
+    m.masked_fill_(torch.triu(torch.ones(L, L, dtype=torch.bool, device=device), diagonal=1), neg)
+    if dropped_key_positions:
+        drop = torch.tensor(sorted(dropped_key_positions), device=device, dtype=torch.long)
+        m[prompt_len:, drop] = neg
+    return m[None, None]
+
+
+@torch.no_grad()
+def quality_forward(model, ids, mask4d, n_keep, device):
+    """Big pass: sdpa (fused) + 4D mask + only the last n_keep logits. Returns [1,n_keep,vocab]."""
+    with _sdpa_ctx(device):
+        out = model(input_ids=ids, attention_mask=mask4d, use_cache=False, logits_to_keep=n_keep)
+    return out.logits
+
+
+def exact_answer_ok(logits_kept, answer_ids):
+    """logits_kept[0,t] predicts answer token t (n_keep=len(answer)+1 ⇒ window starts at prompt_len-1)."""
     for t, a in enumerate(answer_ids):
-        if int(logits[0, prompt_len - 1 + t].argmax()) != int(a):
+        if int(logits_kept[0, t].argmax()) != int(a):
             return False
     return True
 
 
 @torch.no_grad()
-def prompt_attention_mass(model, prompt_ids, n_pages, block_size):
-    """Per-page attention mass of the decode query (last prompt token) over the prompt,
-    averaged over layers & heads. Uses a single-token CACHED forward so attentions are
-    [1,heads,1,L] (O(L)) instead of output_attentions over the full forward (O(L²) per
-    layer — OOMs at long context). Requires attn_implementation='eager'."""
+def attention_mass(model, prompt_ids, n_pages, block_size, device):
+    """Per-page attention mass of the decode query (last prompt token), averaged over
+    layers & heads. Cache built under sdpa (O(L)); attentions captured by a single
+    one-token EAGER forward (q_len=1 ⇒ O(L))."""
     plen = prompt_ids.shape[1]
-    out = model(input_ids=prompt_ids[:, :-1], use_cache=True)          # build cache, no attentions
-    pos = torch.tensor([plen - 1], device=prompt_ids.device)
-    o2 = model(input_ids=prompt_ids[:, -1:], past_key_values=out.past_key_values,
-               use_cache=True, output_attentions=True, cache_position=pos)
+    with _sdpa_ctx(device):
+        cache = model(input_ids=prompt_ids[:, :-1], use_cache=True, logits_to_keep=1).past_key_values
+    model.set_attn_implementation("eager")
+    try:
+        o2 = model(input_ids=prompt_ids[:, -1:], past_key_values=cache, use_cache=True,
+                   output_attentions=True, cache_position=torch.tensor([plen - 1], device=device))
+        atts = o2.attentions
+    finally:
+        model.set_attn_implementation("sdpa")
     mass = np.zeros(n_pages)
-    for layer in o2.attentions:                                       # [1, heads, 1, kv_len=plen]
+    for layer in atts:                                   # [1, heads, 1, kv_len=plen]
         a = layer[0, :, 0, :plen].float().mean(0).cpu().numpy()
         for k in range(min(len(a), plen)):
             mass[page_of(k, block_size)] += a[k]
     return mass
 
 
-def select_pages(policy, n_pages, budget, page_mass, sink=1, recent=1):
+def select_pages(policy, n_pages, budget, mass, sink=1, recent=1):
     J = max(min(n_pages, sink + recent), round(budget * n_pages))
-    floor = set([n_pages - 1]) | set(range(min(sink, n_pages))) | set(range(max(0, n_pages - recent), n_pages))
-    if policy == "recent":
-        order = list(range(n_pages - 1, -1, -1))
-    elif policy == "attention":
-        order = list(np.argsort(-page_mass))
-    else:
-        raise ValueError(policy)
+    floor = {n_pages - 1} | set(range(min(sink, n_pages))) | set(range(max(0, n_pages - recent), n_pages))
+    order = list(range(n_pages - 1, -1, -1)) if policy == "recent" else list(np.argsort(-mass))
     keep = set(floor)
     for p in order:
         if len(keep) >= J:
@@ -151,22 +164,16 @@ def select_pages(policy, n_pages, budget, page_mass, sink=1, recent=1):
 
 
 def correctness_gate(model, tok, dtype, device, block_size):
-    """Two-sided gate: full-keep == causal; tight-keep differs. Abort on failure."""
-    p, a = make_task("single_needle", 0, 60)
+    p, _ = make_task("single_needle", 0, 60)
     ids = tok(p, return_tensors="pt").input_ids.to(device)
     L = ids.shape[1]
-    plain = build_mask(L, L, [], dtype, device)        # pure causal (prompt only; no answer rows)
-    base, _ = forward_logits(model, ids, plain)
-    # full-keep gated: mark all "answer rows" but drop NO pages → must equal causal
-    full = build_mask(L, L - 1, [], dtype, device)     # treat last token as an answer row, drop nothing
-    g_full, _ = forward_logits(model, ids, full)
-    d_full = (base - g_full).abs().max().item()
-    # tight: drop all but the last page for the answer row
+    base = quality_forward(model, ids, build_mask(L, L, [], dtype, device), 2, device)        # plain causal
+    full = quality_forward(model, ids, build_mask(L, L - 1, [], dtype, device), 2, device)    # answer row, drop nothing
+    d_full = (base - full).abs().max().item()
     n_pages = (L + block_size - 1) // block_size
     drop = [k for k in range(L - 1) if page_of(k, block_size) < n_pages - 1]
-    tight = build_mask(L, L - 1, drop, dtype, device)
-    g_tight, _ = forward_logits(model, ids, tight)
-    d_tight = (base - g_tight).abs().max().item()
+    tight = quality_forward(model, ids, build_mask(L, L - 1, drop, dtype, device), 2, device)
+    d_tight = (base - tight).abs().max().item()
     ok = d_full < 1e-3 and d_tight > 1e-2
     print(f"[gate] full-keep vs causal max|Δ|={d_full:.2e} (<1e-3); "
           f"tight vs causal max|Δ|={d_tight:.2e} (>1e-2) => {'PASS' if ok else 'FAIL'}", flush=True)
@@ -177,8 +184,8 @@ def correctness_gate(model, tok, dtype, device, block_size):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
-    ap.add_argument("--n", type=int, default=30)
-    ap.add_argument("--n-filler", type=int, default=300)
+    ap.add_argument("--n", type=int, default=40)
+    ap.add_argument("--n-filler", type=int, default=1500)
     ap.add_argument("--block-size", type=int, default=16)
     ap.add_argument("--families", nargs="+", default=FAMILIES)
     ap.add_argument("--budgets", type=float, nargs="+", default=[1.0, 0.5, 0.25, 0.125, 0.0625])
@@ -191,17 +198,17 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model)
     B = args.block_size
 
-    # gate in fp32 (noise can't mask a bug), then run in bf16 for speed
-    print("loading model (gate, fp32)…", flush=True)
+    print("loading model (gate, fp32, sdpa)…", flush=True)
     gate_model = AutoModelForCausalLM.from_pretrained(
-        args.model, attn_implementation="eager", torch_dtype=getattr(torch, args.gate_dtype)).to(device).eval()
+        args.model, attn_implementation="sdpa", dtype=getattr(torch, args.gate_dtype)).to(device).eval()
     correctness_gate(gate_model, tok, getattr(torch, args.gate_dtype), device, B)
     del gate_model
     if device == "cuda":
         torch.cuda.empty_cache()
-    print("loading model (run, bf16)…", flush=True)
+
+    print("loading model (run, bf16, sdpa)…", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, attn_implementation="eager", torch_dtype=getattr(torch, args.run_dtype)).to(device).eval()
+        args.model, attn_implementation="sdpa", dtype=getattr(torch, args.run_dtype)).to(device).eval()
     rdtype = getattr(torch, args.run_dtype)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
@@ -219,33 +226,31 @@ def main():
             if not answer_ids:
                 continue
             L = ids_full.shape[1]
+            n_keep = len(answer_ids) + 1
             n_pages = (prompt_len + B - 1) // B
-            # full reference (masked forward, NO output_attentions → no O(L²) storage)
-            full_mask = build_mask(L, prompt_len, [], rdtype, device)
-            logits_full, _ = forward_logits(model, ids_full, full_mask)
-            if not exact_answer_ok(logits_full, prompt_len, answer_ids):
-                del logits_full; continue
-            # attention-mass selector via the cheap single-token cached forward
-            mass = prompt_attention_mass(model, ids_full[:, :prompt_len], n_pages, B)
+            try:
+                logits_full = quality_forward(model, ids_full, build_mask(L, prompt_len, [], rdtype, device), n_keep, device)
+                if not exact_answer_ok(logits_full, answer_ids):
+                    del logits_full; continue
+                del logits_full
+                mass = attention_mass(model, ids_full[:, :prompt_len], n_pages, B, device)
+            except torch.cuda.OutOfMemoryError as e:
+                raw.write(json.dumps({"event": "oom", "fam": fam, "L": int(L), "err": str(e)[:120]}) + "\n")
+                torch.cuda.empty_cache(); continue
             acc += 1
             for bf in args.budgets:
                 for policy in ("attention", "recent"):
                     keep = select_pages(policy, n_pages, bf, mass)
                     dropped = [k for k in range(prompt_len) if page_of(k, B) not in set(keep)]
-                    gm = build_mask(L, prompt_len, dropped, rdtype, device)
-                    lg, _ = forward_logits(model, ids_full, gm)
-                    ok = exact_answer_ok(lg, prompt_len, answer_ids)
+                    lg = quality_forward(model, ids_full, build_mask(L, prompt_len, dropped, rdtype, device), n_keep, device)
                     rec = {"family": fam, "budget": bf, "policy": policy,
-                           "J": len(keep), "P": n_pages, "correct": bool(ok)}
-                    records.append(rec); raw.write(json.dumps(rec) + "\n")
-                    del lg
-            del logits_full
+                           "J": len(keep), "P": n_pages, "L": int(L), "correct": bool(exact_answer_ok(lg, answer_ids))}
+                    records.append(rec); raw.write(json.dumps(rec) + "\n"); del lg
             if device == "cuda":
                 torch.cuda.empty_cache()
         print(f"{fam}: {acc} valid ({time.perf_counter()-t0:.0f}s)", flush=True)
     raw.close()
 
-    # iso-quality budget per family for the deployable (attention) selector
     summary = {"model": args.model, "by_family": {}}
     print(f"\n{'family':18s} {'budget':>7} {'attn':>6} {'recent':>7}")
     for fam in args.families:
@@ -267,15 +272,16 @@ def main():
             else:
                 break
         summary["by_family"][fam] = {"full_acc": full, "iso_quality_budget": iso,
-                                     "capacity_multiplier_at_iso": round(1.0/iso, 2), "per_budget": per}
+                                     "capacity_multiplier_at_iso": round(1.0/iso, 2),
+                                     "context_tokens": int(np.median([r["L"] for r in fr])), "per_budget": per}
     (out / f"summary_{tag}.json").write_text(json.dumps(summary, indent=2))
     print("\n=== iso-quality budget (deployable attention selector) ===")
     for fam, s in summary["by_family"].items():
-        print(f"  {fam:18s} iso-budget={s['iso_quality_budget']:.4f} → {s['capacity_multiplier_at_iso']}× capacity")
+        print(f"  {fam:18s} ctx~{s['context_tokens']:>6}tok  iso-budget={s['iso_quality_budget']:.4f} "
+              f"→ {s['capacity_multiplier_at_iso']}× capacity")
     mults = [s["capacity_multiplier_at_iso"] for s in summary["by_family"].values()]
     if mults:
-        print(f"\nrealistic capacity multiplier across task difficulty: "
-              f"worst-task {min(mults):.1f}× … best-task {max(mults):.1f}×")
+        print(f"\nrealistic capacity multiplier: worst-task {min(mults):.1f}× … best-task {max(mults):.1f}×")
 
 
 if __name__ == "__main__":
