@@ -70,11 +70,16 @@ def make_task(family, seed, n_filler):
         facts = " ".join(f"The code for {k} is {v}." for k, v in ks.items())
         return f"{pre} {facts} {_filler(rng,4)} {post} The code for {tgt} is", f" {ks[tgt]}"
     if family == "multi_hop":
+        # true 2-hop w/ interference: 3 rooms, different counts, placed EARLY (far from
+        # the query) so recent-only fails; model must link person -> room -> that count.
+        rooms = rng.sample(["vault", "archive", "cellar", "loft", "annex"], 3)
+        counts = {r: rng.randint(100, 999) for r in rooms}
         person = rng.choice(["Mara", "Tomas", "Yuki", "Devon"])
-        room = rng.choice(["the vault", "the archive", "the cellar"])
-        num = rng.randint(100, 999)
-        return (f"{pre} {person} works in {room}. {_filler(rng,4)} {post} The {room.split()[-1]} holds "
-                f"exactly {num} boxes. {_filler(rng,3)} The number of boxes in the room where {person} works is"), f" {num}"
+        target = rng.choice(rooms)
+        facts = (f" {person} works in the {target}."
+                 + "".join(f" The {r} holds exactly {counts[r]} boxes." for r in rooms))
+        return (f"Read carefully.{facts} {pre} {post} "
+                f"The number of boxes in the room where {person} works is"), f" {counts[target]}"
     if family == "distractor":
         tgt = rng.randint(100, 999)
         dec = " ".join(f"A decoy total is {rng.randint(100,999)}." for _ in range(4))

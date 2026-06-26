@@ -61,14 +61,17 @@ def make_task(family, seed, n_filler):
         facts = " ".join(f"The code for {k} is {v}." for k, v in ks.items())
         mid = _filler(rng, 4)
         return f"{pre} {facts} {mid} {post} The code for {target} is", f" {ks[target]}"
-    if family == "multi_hop":          # compose two distant facts (least redundant)
+    if family == "multi_hop":          # true 2-hop w/ interference (least redundant)
+        # 3 rooms each with a DIFFERENT count, placed EARLY (far from the query) so
+        # recent-only fails; the model must link person -> their room -> that count.
+        rooms = rng.sample(["vault", "archive", "cellar", "loft", "annex"], 3)
+        counts = {r: rng.randint(100, 999) for r in rooms}
         person = rng.choice(["Mara", "Tomas", "Yuki", "Devon"])
-        room = rng.choice(["the vault", "the archive", "the cellar"])
-        num = rng.randint(100, 999)
-        f1 = f" {person} works in {room}."
-        f2 = f" The {room.split()[-1]} holds exactly {num} boxes."
-        return (f"{pre}{f1} {_filler(rng,4)} {post}{f2} {_filler(rng,3)} "
-                f"The number of boxes in the room where {person} works is"), f" {num}"
+        target = rng.choice(rooms)
+        facts = (f" {person} works in the {target}."
+                 + "".join(f" The {r} holds exactly {counts[r]} boxes." for r in rooms))
+        return (f"Read carefully.{facts} {pre} {post} "
+                f"The number of boxes in the room where {person} works is"), f" {counts[target]}"
     if family == "distractor":         # many same-surface decoys
         target = rng.randint(100, 999)
         decoys = " ".join(f"A decoy total is {rng.randint(100,999)}." for _ in range(4))
