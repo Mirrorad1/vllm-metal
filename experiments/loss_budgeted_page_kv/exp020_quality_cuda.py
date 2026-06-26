@@ -74,7 +74,7 @@ def make_task(family, seed, n_filler):
         room = rng.choice(["the vault", "the archive", "the cellar"])
         num = rng.randint(100, 999)
         return (f"{pre} {person} works in {room}. {_filler(rng,4)} {post} The {room.split()[-1]} holds "
-                f"exactly {num} boxes. {_filler(rng,3)} How many boxes are where {person} works? Answer:"), f" {num}"
+                f"exactly {num} boxes. {_filler(rng,3)} The number of boxes in the room where {person} works is"), f" {num}"
     if family == "distractor":
         tgt = rng.randint(100, 999)
         dec = " ".join(f"A decoy total is {rng.randint(100,999)}." for _ in range(4))

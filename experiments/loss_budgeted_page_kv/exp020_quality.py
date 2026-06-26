@@ -68,7 +68,7 @@ def make_task(family, seed, n_filler):
         f1 = f" {person} works in {room}."
         f2 = f" The {room.split()[-1]} holds exactly {num} boxes."
         return (f"{pre}{f1} {_filler(rng,4)} {post}{f2} {_filler(rng,3)} "
-                f"How many boxes are where {person} works? Answer:"), f" {num}"
+                f"The number of boxes in the room where {person} works is"), f" {num}"
     if family == "distractor":         # many same-surface decoys
         target = rng.randint(100, 999)
         decoys = " ".join(f"A decoy total is {rng.randint(100,999)}." for _ in range(4))
