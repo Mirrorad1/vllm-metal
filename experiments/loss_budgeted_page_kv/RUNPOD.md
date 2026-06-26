@@ -9,17 +9,18 @@ Validated locally on CPU (transformers 5.12.1, torch 2.11): the correctness gate
 exactly (`full-keep vs causal max|Δ| = 0.00e+00`; tight = 15.2). The same gate re-runs on
 the GPU before any result — if it ever FAILs, stop (the mask is wrong, numbers meaningless).
 
-## Pod
-- Any single modern GPU. 7B bf16 weights ≈ 16 GB. The attention-mass selector now uses a
-  single-token cached forward (O(L), cheap), so the memory limit is the **eager gated
-  forward's per-layer score matrix, O(heads·L²)** (transient, one layer at a time):
-  - 7B @ ~4k ctx (`--n-filler 300`): ~24 GB card (A10/L4/3090) is fine.
-  - 7B @ ~16k ctx (`--n-filler 3000`): **H100 80 GB** comfortable (~15 GB/layer transient).
-  - 7B @ ~32k ctx: tight even on 80 GB (~60 GB/layer) — shorten or use a smaller model.
-  - 14B @ ~8k, or 32B @ ~3–4k: H100 80 GB.
-- **H100 is ideal** — use the headroom to push model size + context well past the local Mac
-  (that's the point of validating at scale). Standard RunPod "PyTorch 2.x / CUDA 12.x"
-  template; `pip install "torch"` picks the cu12 build. No special flags.
+## Pod & sizing (IMPORTANT — eager attention is O(heads·L²))
+`--n-filler` counts filler SENTENCES (~14 tokens each), so context = roughly n_filler·14:
+`150→2.1k, 250→3.5k, 400→5.5k, 600→8.2k, 1500→20k, 3000→41k` tokens. The eager softmax
+score matrix is `heads·L²·4 bytes` per layer (transient) — this is the binding limit, NOT
+the weights. **Keep context modest.** Tested-safe on H100 80 GB:
+  - 7B: `--n-filler 400` (~5.5k) solid; up to `--n-filler 600` (~8k) with expandable_segments.
+  - 14B: `--n-filler 250` (~3.5k); ~`400` (~5.5k) max.
+  - `--n-filler 1500/3000` (20k/41k) **OOMs even on 80 GB** in eager — needs the sdpa/cache
+    rewrite (ask; not in this version).
+Always set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Even 5–8k context at
+7B/14B on harder tasks is far past the local Mac and enough to validate the hypothesis.
+Standard RunPod "PyTorch 2.x / CUDA 12.x" template; no special build flags.
 
 ## Setup
 ```bash
