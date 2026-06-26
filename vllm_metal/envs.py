@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     VLLM_METAL_BUILD_FROM_SOURCE: bool = False
     VLLM_METAL_VISIBLE_DEVICES: str | None = None
     VLLM_METAL_RING_BASE_PORT: int = 32323
+    VLLM_METAL_BELIEF_PAGED_ATTENTION: bool = False
+    VLLM_METAL_LOSS_BUDGETED_PAGE_KV: bool = False
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # Fraction of unified memory to use.  "auto" (the default) means the
@@ -91,6 +93,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # mlx.launch's starting_port. See distributed.md#pipeline-parallelism.
     "VLLM_METAL_RING_BASE_PORT": lambda: int(
         os.getenv("VLLM_METAL_RING_BASE_PORT", "32323")
+    ),
+    # EXPERIMENTAL (default off): belief-gated paged attention. When set to "1"
+    # AND a selector is registered via
+    # vllm_metal.attention.belief_gate.register_selector, the decode attention
+    # read uses a compact (belief-selected) subset of each sequence's KV pages
+    # instead of the full block table. The selector is a pure host-side
+    # control-plane transform; the KV write path (slot_mapping) and the
+    # scheduler's allocations are untouched, so no physical page is reclaimed
+    # (shadow mode). Off ⇒ exact no-op (full block table). See
+    # experiments/belief_paged_attention/.
+    "VLLM_METAL_BELIEF_PAGED_ATTENTION": lambda: (
+        os.getenv("VLLM_METAL_BELIEF_PAGED_ATTENTION", "0") == "1"
+    ),
+    # EXPERIMENTAL (default off): loss-budgeted page KV cache. Shares the same
+    # generic decode-read page-gating seam (vllm_metal/attention/belief_gate.py)
+    # as the belief flag above — the seam only rewrites the block table for the
+    # attention read and is policy-agnostic. KV-cache-only; no belief inference.
+    # See experiments/loss_budgeted_page_kv/.
+    "VLLM_METAL_LOSS_BUDGETED_PAGE_KV": lambda: (
+        os.getenv("VLLM_METAL_LOSS_BUDGETED_PAGE_KV", "0") == "1"
     ),
 }
 

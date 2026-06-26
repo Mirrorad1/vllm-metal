@@ -1,0 +1,6 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "n": 30,
+  "n_filler": 210,
+  "out": "/Users/mirro/Projects/vllm-metal/experiments/loss_budgeted_page_kv/results/exp015_logitlens"
+}

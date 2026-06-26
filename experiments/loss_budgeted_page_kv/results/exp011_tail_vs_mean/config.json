@@ -1,0 +1,13 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "n": 150,
+  "n_filler": 210,
+  "budgets": [
+    0.0625,
+    0.03125,
+    0.015625,
+    0.0078125
+  ],
+  "primary_bf": 0.03125,
+  "out": "/Users/mirro/Projects/vllm-metal/experiments/loss_budgeted_page_kv/results/exp011_tail_vs_mean"
+}

@@ -1,0 +1,22 @@
+{
+  "n": 30,
+  "n_units": 48,
+  "single_flip_rate_mean": 0.0,
+  "max_single_dlp_mean": 0.018299000539804548,
+  "top1_dlp_mean": 0.018299000539804548,
+  "top3_dlp_sum_mean": 0.026949415263162406,
+  "budget_acc": {
+    "1": 0.0,
+    "2": 0.0,
+    "4": 0.3,
+    "8": 1.0,
+    "16": 1.0,
+    "24": 1.0,
+    "32": 1.0,
+    "48": 1.0
+  },
+  "head_kstar_0.9": 8,
+  "page_baseline": "exp011: single-page ablation \u0394lp\u22480.0009 (NO page individually load-bearing)",
+  "verdict": "LATENT HEAD-DENSE too (redundant in head-space as well)",
+  "verdict_reason": "only 0.0% of heads individually flip the answer (max \u0394logp 0.02 nat): the answer is redundant across HEADS as well as pages \u2014 diffusion is total. No sparse latent unit to exploit; the redundancy is genuinely compute-graph/distributed. Deeper conclusion: the exploitable structure is neither page nor head; pivot to systems."
+}
