@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 # ---------------------------------------------------------------------------
 # tasks (identical to the MLX exp020; progressively harder / less redundant)
@@ -186,6 +186,112 @@ def correctness_gate(model, tok, dtype, device, block_size):
         raise SystemExit("correctness gate FAILED — the mask is wrong; every downstream number is meaningless.")
 
 
+# ---------------------------------------------------------------------------
+# FAST path (lever 1): prefill the prompt ONCE, then decode-only per budget over a
+# sliced cache. ~5-10x fewer long forwards. Proven equivalent to the 4D-mask path
+# by the built-in preflight (run_preflight) below — abort if it ever disagrees.
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def prefill_template(model, prompt_ids, device):
+    """KV cache over prompt[:-1] (positions 0..plen-2); the last prompt token is the
+    first decode query. Never forwarded-into directly — copies are made per use."""
+    with _sdpa_ctx(device):
+        return model(input_ids=prompt_ids[:, :-1], use_cache=True, logits_to_keep=1).past_key_values
+
+
+def _keep_tok_for_cache(keep_pages, prompt_len, B):
+    return sorted({t for p in keep_pages for t in range(p * B, min(p * B + B, prompt_len - 1))})
+
+
+def _fresh_sliced(template, keep_tok, device):
+    new = DynamicCache()
+    idx = torch.tensor(keep_tok, device=device, dtype=torch.long)
+    for i, layer in enumerate(template.layers):
+        new.update(layer.keys.index_select(2, idx), layer.values.index_select(2, idx), i)
+    return new
+
+
+@torch.no_grad()
+def gated_exact_answer_fast(model, template, prompt_ids, answer_ids, keep_pages, B, device):
+    """Decode the answer over a cache sliced to keep_pages, with ABSOLUTE position_ids
+    (RoPE) and sliced cache_position. Returns exact-answer bool."""
+    plen = prompt_ids.shape[1]
+    keep_tok = _keep_tok_for_cache(keep_pages, plen, B)
+    cache = _fresh_sliced(template, keep_tok, device)
+    kept = len(keep_tok)
+    if len(answer_ids) > 1:
+        q = torch.cat([prompt_ids[:, -1:], torch.tensor([answer_ids[:-1]], device=device, dtype=torch.long)], dim=1)
+    else:
+        q = prompt_ids[:, -1:]
+    n = q.shape[1]
+    pos = torch.arange(plen - 1, plen - 1 + n, device=device)[None]
+    cp = torch.arange(kept, kept + n, device=device)
+    with _sdpa_ctx(device):
+        lg = model(input_ids=q, past_key_values=cache, use_cache=True, position_ids=pos, cache_position=cp).logits
+    return all(int(lg[0, t].argmax()) == int(a) for t, a in enumerate(answer_ids))
+
+
+@torch.no_grad()
+def attention_mass_fast(model, template, prompt_ids, n_pages, block_size, device):
+    """Attention mass of the last prompt token over the cached prompt (reuses the
+    prefill template; one eager one-token forward)."""
+    plen = prompt_ids.shape[1]
+    full = _fresh_sliced(template, list(range(plen - 1)), device)
+    model.set_attn_implementation("eager")
+    try:
+        o2 = model(input_ids=prompt_ids[:, -1:], past_key_values=full, use_cache=True,
+                   output_attentions=True, position_ids=torch.tensor([[plen - 1]], device=device),
+                   cache_position=torch.arange(plen - 1, plen, device=device))
+        atts = o2.attentions
+    finally:
+        model.set_attn_implementation("sdpa")
+    mass = np.zeros(n_pages)                              # kv_len = (plen-1 cached) + 1 current = plen
+    for layer in atts:                                    # [1, heads, 1, plen]; index plen-1 = self-token
+        a = layer[0, :, 0, :plen].float().mean(0).cpu().numpy()
+        for k in range(min(len(a), plen)):
+            mass[page_of(k, block_size)] += a[k]
+    return mass
+
+
+def run_preflight(model, tok, rdtype, device, B, budgets, n_check=6):
+    """Prove the WHOLE fast path ≡ the validated mask path before trusting any result:
+      (a) the fast selector (attention_mass_fast) picks the SAME pages as the mask-path
+          selector, and (b) the fast decode reproduces the SAME exact-answer decision on
+          those pages. Abort on any mismatch in either."""
+    dec_mism = dec_tot = sel_mism = sel_tot = 0
+    for s in range(n_check):
+        fam = FAMILIES[s % len(FAMILIES)]
+        prompt, answer = make_task(fam, 1000 + s, 80)
+        ids = tok(prompt + answer, return_tensors="pt").input_ids.to(device)
+        plen = tok(prompt, return_tensors="pt").input_ids.shape[1]
+        ans = ids[0, plen:].tolist()
+        if not ans:
+            continue
+        L = ids.shape[1]; nk = len(ans) + 1; npg = (plen + B - 1) // B
+        template = prefill_template(model, ids[:, :plen], device)
+        mass = attention_mass(model, ids[:, :plen], npg, B, device)          # validated signal
+        mass_f = attention_mass_fast(model, template, ids[:, :plen], npg, B, device)  # fast signal
+        for bf in budgets:
+            for policy in ("attention", "recent"):
+                keep = select_pages(policy, npg, bf, mass)        # mask-path selection (reference)
+                keep_f = select_pages(policy, npg, bf, mass_f)    # fast-path selection (production)
+                sel_tot += 1; sel_mism += int(keep != keep_f)
+                # decode equivalence on the SAME (reference) keep-set isolates the decode path:
+                dropped = [k for k in range(plen) if page_of(k, B) not in set(keep)]
+                ref = exact_answer_ok(
+                    quality_forward(model, ids, build_mask(L, plen, dropped, rdtype, device), nk, device), ans)
+                fst = gated_exact_answer_fast(model, template, ids[:, :plen], ans, keep, B, device)
+                dec_tot += 1; dec_mism += int(ref != fst)
+        if device == "cuda":
+            torch.cuda.empty_cache()
+    ok = dec_mism == 0 and sel_mism == 0
+    print(f"[fast-preflight] decode fast≡mask: {dec_tot-dec_mism}/{dec_tot} identical; "
+          f"selector fast≡mask: {sel_tot-sel_mism}/{sel_tot} identical "
+          f"=> {'PASS' if ok else 'FAIL'}", flush=True)
+    if not ok:
+        raise SystemExit("fast path disagrees with the validated mask path — refusing to use it.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
@@ -197,6 +303,10 @@ def main():
     ap.add_argument("--iso-thresh", type=float, default=0.9)
     ap.add_argument("--gate-dtype", default="float32")
     ap.add_argument("--run-dtype", default="bfloat16")
+    ap.add_argument("--engine", choices=["mask", "fast"], default="fast",
+                    help="fast = prefill prompt once + decode-only per budget (lever 1, ~5-10x fewer "
+                         "long forwards); mask = the validated 4D-mask reference path. fast self-proves "
+                         "equivalence to mask via a preflight before any result is trusted.")
     ap.add_argument("--out", default="exp020_cuda_results")
     args = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -216,6 +326,10 @@ def main():
         args.model, attn_implementation="sdpa", dtype=getattr(torch, args.run_dtype)).to(device).eval()
     rdtype = getattr(torch, args.run_dtype)
 
+    if args.engine == "fast":
+        print("engine=fast → proving fast≡mask before any result…", flush=True)
+        run_preflight(model, tok, rdtype, device, B, args.budgets, n_check=6)
+
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     tag = args.model.split("/")[-1]
     raw = open(out / f"raw_{tag}.jsonl", "w")
@@ -234,11 +348,19 @@ def main():
             n_keep = len(answer_ids) + 1
             n_pages = (prompt_len + B - 1) // B
             try:
-                logits_full = quality_forward(model, ids_full, build_mask(L, prompt_len, [], rdtype, device), n_keep, device)
-                if not exact_answer_ok(logits_full, answer_ids):
-                    del logits_full; continue
-                del logits_full
-                mass = attention_mass(model, ids_full[:, :prompt_len], n_pages, B, device)
+                if args.engine == "fast":
+                    # lever 1: prefill the prompt ONCE; reference + every budget decode over slices.
+                    template = prefill_template(model, ids_full[:, :prompt_len], device)
+                    if not gated_exact_answer_fast(model, template, ids_full[:, :prompt_len], answer_ids,
+                                                   list(range(n_pages)), B, device):
+                        del template; continue
+                    mass = attention_mass_fast(model, template, ids_full[:, :prompt_len], n_pages, B, device)
+                else:
+                    logits_full = quality_forward(model, ids_full, build_mask(L, prompt_len, [], rdtype, device), n_keep, device)
+                    if not exact_answer_ok(logits_full, answer_ids):
+                        del logits_full; continue
+                    del logits_full
+                    mass = attention_mass(model, ids_full[:, :prompt_len], n_pages, B, device)
             except torch.cuda.OutOfMemoryError as e:
                 raw.write(json.dumps({"event": "oom", "fam": fam, "L": int(L), "err": str(e)[:120]}) + "\n")
                 torch.cuda.empty_cache(); continue
@@ -246,11 +368,18 @@ def main():
             for bf in args.budgets:
                 for policy in ("attention", "recent"):
                     keep = select_pages(policy, n_pages, bf, mass)
-                    dropped = [k for k in range(prompt_len) if page_of(k, B) not in set(keep)]
-                    lg = quality_forward(model, ids_full, build_mask(L, prompt_len, dropped, rdtype, device), n_keep, device)
+                    if args.engine == "fast":
+                        correct = gated_exact_answer_fast(model, template, ids_full[:, :prompt_len],
+                                                          answer_ids, keep, B, device)
+                    else:
+                        dropped = [k for k in range(prompt_len) if page_of(k, B) not in set(keep)]
+                        lg = quality_forward(model, ids_full, build_mask(L, prompt_len, dropped, rdtype, device), n_keep, device)
+                        correct = exact_answer_ok(lg, answer_ids); del lg
                     rec = {"family": fam, "budget": bf, "policy": policy,
-                           "J": len(keep), "P": n_pages, "L": int(L), "correct": bool(exact_answer_ok(lg, answer_ids))}
-                    records.append(rec); raw.write(json.dumps(rec) + "\n"); del lg
+                           "J": len(keep), "P": n_pages, "L": int(L), "correct": bool(correct)}
+                    records.append(rec); raw.write(json.dumps(rec) + "\n")
+            if args.engine == "fast":
+                del template
             if device == "cuda":
                 torch.cuda.empty_cache()
         print(f"{fam}: {acc} valid ({time.perf_counter()-t0:.0f}s)", flush=True)

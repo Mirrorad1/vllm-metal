@@ -9,6 +9,24 @@ Validated locally on CPU (transformers 5.12.1, torch 2.11): the correctness gate
 exactly (`full-keep vs causal max|Δ| = 0.00e+00`; tight = 15.2). The same gate re-runs on
 the GPU before any result — if it ever FAILs, stop (the mask is wrong, numbers meaningless).
 
+## Two engines (`--engine`, default `fast`) — same numbers, ~5-10× faster
+There are two equivalent implementations of the budget sweep:
+- **`fast` (default):** prefill the prompt's KV cache **once**, then for every (budget × policy)
+  just **decode the answer over a sliced cache** — no long forward per combination. With ~13
+  combinations per example this is ~5-10× fewer long forwards. Uses absolute `position_ids`
+  (RoPE) with sliced `cache_position`, and **never materializes an O(L²) mask** at all.
+- **`mask`:** the validated reference — one full `[prompt+answer]` forward per combination
+  under a 4D additive mask.
+
+**`fast` self-proves it equals `mask` before any result is trusted.** On startup it runs a
+preflight over the first few example×budget×policy points and asserts BOTH that the fast
+selector picks the **same pages** and the fast decode makes the **same exact-answer decision**
+as the mask path — printing e.g. `[fast-preflight] decode fast≡mask: 36/36 identical; selector
+fast≡mask: 36/36 identical => PASS`. **Any mismatch aborts the run** (it refuses to report
+numbers it can't prove equal to the reference). To audit, run the same config with
+`--engine mask` and confirm the per-family table matches. Proven equivalent on CPU 0.5B
+(identical decisions across families × budgets × policies).
+
 ## Pod & sizing (this version is MEMORY-EFFICIENT — sdpa, not eager)
 This version runs the big forwards under sdpa (fused mem-efficient backend) + a 4D mask +
 `logits_to_keep`, so it does NOT materialize the O(L²) score matrix or O(L·vocab) logits
@@ -18,10 +36,12 @@ This version runs the big forwards under sdpa (fused mem-efficient backend) + a 
   - 7B: `--n-filler 1500` (~20k) and `3000` (~41k) fit comfortably on an H100 80 GB.
   - 14B: `--n-filler 1500` (~20k) fits; `3000` (~41k) is tight but should fit.
 Always set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
-**If you still OOM**, it means PyTorch picked the MATH sdpa backend for the custom mask
-(the `[gate]` line would print, then OOM on the first long forward) — tell me and I'll
-ship the v3 cache-slicing variant (no mask tensor at all). Standard RunPod
-"PyTorch 2.x / CUDA 12.x" template; no special build flags.
+The sizing above is for `--engine mask`. **`--engine fast` (the default) never builds the
+O(L²) mask tensor at all** (it slices the KV cache instead), so it's even lighter on memory —
+if `mask` ever OOMs on the longest contexts, `fast` is the path that avoids it. Standard
+RunPod "PyTorch 2.x / CUDA 12.x" template; no special build flags. (Historical note: the
+`fast` engine is the "v3 cache-slicing variant" the earlier SPEC named as the OOM fallback —
+it's now the default and proven equivalent to the mask path.)
 
 ## Setup
 ```bash
@@ -36,22 +56,27 @@ export HF_HOME=/workspace/hf            # persist the model cache on the pod vol
 ```bash
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# 1. quick sanity (gate must PASS):
+# 1. quick sanity (gate must PASS, then preflight must print "=> PASS"):
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 5 --n-filler 400
 
-# 2. the real validation: 7B @ ~20k context, all 5 task families:
+# 2. the real validation: 7B @ ~20k context, all 5 task families (fast engine, default):
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler 1500 --block-size 16
 
 # 3. push to ~41k context, and/or a bigger model on the same H100:
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct  --n 30 --n-filler 3000
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-14B-Instruct --n 30 --n-filler 1500
+
+# (optional audit) re-run any config on the reference path — table must match the fast run:
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler 1500 --engine mask
 ```
 
 ## What to read
 1. **`[gate] … => PASS`** must print first. If FAIL, stop.
-2. The per-family table: `attn` (deployable selector) vs `recent` (floor) exact-answer
+2. **`[fast-preflight] … => PASS`** must print next (fast engine). If FAIL, the run aborts
+   itself — the fast path didn't match the reference, so no numbers are reported.
+3. The per-family table: `attn` (deployable selector) vs `recent` (floor) exact-answer
    accuracy at each budget.
-3. **iso-quality budget** per family and its `capacity multiplier` (=1/budget). The
+4. **iso-quality budget** per family and its `capacity multiplier` (=1/budget). The
    headline = the **worst-task** multiplier (that's the safe budget you'd ship).
 
 ## What this answers
