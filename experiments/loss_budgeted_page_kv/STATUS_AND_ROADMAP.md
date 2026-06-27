@@ -14,11 +14,23 @@ hurting quality? **Answer: no — and that "no" is the real finding.** The infor
 a model needs is **holographically smeared** across the whole cache (no single page,
 head, or layer carries the answer; it's *computed late* from distributed evidence),
 so a cheap "keep recent + high-attention pages" rule is already as good as a perfect
-oracle. The leverage is **not** in *which* pages you keep; it's purely in **keeping
-fewer and actually freeing them**. Doing that buys a real, quantified **~2–4×
-serving-capacity** win at quality-safe budgets — using a **known technique**
+oracle (note: "recent" *alone* is not enough — see exp020; you need the attention
+signal to find off-recency answers). The leverage is **not** in *which* clever scoring
+you use; it's in **keeping fewer pages and actually freeing them**. Doing that buys a
+real serving-capacity win at quality-safe budgets — using a **known technique**
 (eviction), now measured and made safe for this stack. It is **not** a novel
 capability and **not** a clean context extension.
+
+**How big? It depends on the workload, and now we have a real measurement (exp020, 2026-06):**
+on **Qwen2.5-7B at ~20k context**, the deployable attention selector holds exact-answer
+iso-quality down to **6.25% budget on 4/5 retrieval families (16×)** and **12.5% on
+true-2-hop (8×)** — self-proven equal to the validated reference (preflight 60/60). That
+**beats** the earlier conservative ~2–4× extrapolation, but it is an **upper bound for
+sparse-answer retrieval** (one answer span in generic, ignorable filler). General
+generation / dense-context-integration workloads will need a higher budget → a lower
+multiplier, and that number is **still unmeasured**. Quote **8× (worst measured task)** as
+the safe-to-ship retrieval figure; keep **~2–4×** as the conservative number for general
+workloads until measured.
 
 ---
 
@@ -55,9 +67,16 @@ The three durable findings:
   honest reliable-recall gain is much smaller than the memory multiplier.
 - ❌ OVERCLAIM "novel": eviction / sliding-window / StreamingLLM / H2O already do "longer
   context with bounded memory." This brings it to vllm-metal; it does not invent it.
-- ⚠️ UNVALIDATED AT SCALE: all measurements are 0.5B on Apple-Silicon with single-needle
-  COPY tasks (the easy, maximally-redundant case). The 2–4× and the iso-quality budget
-  are extrapolated principle, not measured on a real long-context model/benchmark.
+- ✅ NOW VALIDATED AT SCALE FOR RETRIEVAL (exp020, Qwen2.5-7B @ ~20k ctx, n=40/family):
+  the deployable attention selector holds exact-answer iso-quality to 6.25% budget on 4/5
+  families (16×) and 12.5% on true-2-hop (8×); fast cache-slicing engine self-proved equal
+  to the validated mask reference (gate Δ=0, preflight 60/60 decode + 60/60 selector).
+- ⚠️ STILL UNMEASURED — GENERAL WORKLOADS: exp020's tasks are sparse-ANSWER retrieval (a
+  single answer span) in generic IGNORABLE filler — the high-redundancy regime, so 8–16× is
+  an UPPER bound for that task class. Dense-context-integration (summarization, multi-fact
+  synthesis, code) and full-generation quality (perplexity, not just exact-answer) are not
+  yet measured and will need a higher budget → lower multiplier. And this is still SELECTION
+  quality; realized serving throughput needs the upstream wiring (Track A / exp018).
 
 ---
 
@@ -113,22 +132,27 @@ Risks (from the audit): refcount race (mitigated by step 2's atomic recheck); br
 contract); prefix-cache hit-rate regression (mitigated by safe_to_reclaim excluding shared
 blocks). **Do not** call free from the gate / lie to the scheduler — route through steps 1–3.
 
-### Track B — validate the iso-quality budget on real workloads (science) [IN PROGRESS]
+### Track B — validate the iso-quality budget on real workloads (science) [7B/20k DONE]
 
 The 25% iso-quality assumption is borrowed from the eviction literature. **exp020** measures
 the budget-vs-quality curve directly on progressively harder tasks (single-needle → multi-
 needle → exact-long-string → multi-hop → distractor) with the deployable attention/recent
 selector and exact-answer accuracy.
-- **Local 0.5B (preliminary, `results/exp020_quality/`):** the attention selector holds
-  iso-quality to ~6–12% budget (8–16×) — but this is an OPTIMISTIC bound (short context,
-  fresh-attention signal, tiny model).
-- **Real validation (run this): `exp020_quality_cuda.py` on RunPod** — see `RUNPOD.md`. A
-  self-contained transformers/CUDA port (the MLX harness is Apple-only), validated on CPU:
-  the correctness gate passes exactly (full-budget==dense, Δ=0). Run at 7B+/longer context
-  to get the honest per-task iso-budget → the real capacity multiplier. Hypothesis: harder
-  families need a higher budget, so the realistic multiplier is ~2–4×, not 16×.
-- This is also the only test that could reopen the latent question (sparse retrieval heads
-  may appear at 7B+/multi-hop, exp013/014 scope).
+- **Local 0.5B (preliminary):** attention selector holds iso-quality to ~6–12% budget — an
+  optimistic bound (short context, tiny model).
+- **✅ 7B @ ~20k context (RunPod H100, n=40/family, 2026-06):** attention selector holds
+  exact-answer iso-quality to **6.25% budget on single_needle / exact_long_string /
+  multi_needle / distractor (16×)** and **12.5% on true-2-hop multi_hop (8×)**; **recent-only
+  collapses to ≤0.20 at 50% budget** (the attention signal carries real off-recency
+  retrieval). The fast cache-slicing engine self-proved equal to the validated mask reference
+  (gate Δ=0; preflight 60/60 decode + 60/60 selector). This BEATS the conservative ~2–4×
+  hypothesis — because these are sparse-answer tasks (one span) in ignorable filler.
+- **⚠️ Remaining gap before quoting a universal multiplier:** measure a DENSE-integration /
+  general-generation workload (summarization, multi-fact synthesis, code; perplexity not just
+  exact-answer). 8–16× is the retrieval upper bound; the general number is expected lower.
+- No retrieval-head localization observed (multi_hop degrades gracefully with budget, not via
+  a few load-bearing heads) — consistent with the holographic finding; latent question stays
+  closed at 7B.
 
 ### Recommended order
 1. **Track B first** (cheap, decisive on the real number) if a 7B+ box is available —
