@@ -200,7 +200,11 @@ def main():
     print(f"\n{'family':18s} {'budget':>7} {'attn_acc':>9} {'recent_acc':>11}")
     for fam in fams:
         fr = [r for r in records if r["family"] == fam]
-        full_acc = float(np.mean([r["attention_correct"] for r in fr if abs(r["budget"]-1.0) < 1e-9])) or 1.0
+        # nan-safe baseline: np.mean([]) is nan and `nan or 1.0` is nan (bool(nan) is True), which
+        # would silently force iso=1.0. Accepted instances pass the full cache by construction, so a
+        # missing 1.0 budget means baseline 1.0.
+        full_vals = [r["attention_correct"] for r in fr if abs(r["budget"]-1.0) < 1e-9]
+        full_acc = float(np.mean(full_vals)) if full_vals else 1.0
         per_b = {}
         for bf in args.budgets:
             sub = [r for r in fr if abs(r["budget"] - bf) < 1e-9]

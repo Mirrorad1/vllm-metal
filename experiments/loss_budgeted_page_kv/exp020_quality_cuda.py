@@ -159,6 +159,11 @@ def build_mask(L, prompt_len, dropped_key_positions, dtype, device):
     if dropped_key_positions:
         drop = torch.tensor(sorted(dropped_key_positions), device=device, dtype=torch.long)
         m[prompt_len - 1:, drop] = neg
+    # A query token always has its OWN KV in a real decode (it is the live token, never evicted),
+    # so no query row may be fully masked. Guaranteeing the diagonal is unmasked matches the
+    # cache-slicing fast path, and prevents a softmax-over-all-(-inf) NaN if a budget ever drops
+    # the page a (gated) query row sits in. No-op for valid rows (their own column is never dropped).
+    m.fill_diagonal_(0)
     return m[None, None]
 
 
@@ -218,15 +223,20 @@ def correctness_gate(model, tok, dtype, device, block_size):
     ids = tok(p, return_tensors="pt").input_ids.to(device)
     L = ids.shape[1]
     base = quality_forward(model, ids, build_mask(L, L, [], dtype, device), 2, device)        # plain causal
-    full = quality_forward(model, ids, build_mask(L, L - 1, [], dtype, device), 2, device)    # answer row, drop nothing
+    full = quality_forward(model, ids, build_mask(L, L - 1, [], dtype, device), 2, device)    # gated row, drop nothing
     d_full = (base - full).abs().max().item()
     n_pages = (L + block_size - 1) // block_size
-    drop = [k for k in range(L - 1) if page_of(k, block_size) < n_pages - 1]
-    tight = quality_forward(model, ids, build_mask(L, L - 1, drop, dtype, device), 2, device)
+    # tight: gate the LAST token (row L-1 — always in the kept last page, like the experiment's
+    # first decode query, so never starved) and drop every earlier page. The mask must materially
+    # change that position's logits.
+    drop = [k for k in range(L) if page_of(k, block_size) < n_pages - 1]
+    tight = quality_forward(model, ids, build_mask(L, L, drop, dtype, device), 2, device)
     d_tight = (base - tight).abs().max().item()
-    ok = d_full < 1e-3 and d_tight > 1e-2
+    has_nan = bool(torch.isnan(tight).any() or torch.isnan(full).any())
+    ok = d_full < 1e-3 and d_tight > 1e-2 and not has_nan
     print(f"[gate] full-keep vs causal max|Δ|={d_full:.2e} (<1e-3); "
-          f"tight vs causal max|Δ|={d_tight:.2e} (>1e-2) => {'PASS' if ok else 'FAIL'}", flush=True)
+          f"tight vs causal max|Δ|={d_tight:.2e} (>1e-2){' NaN!' if has_nan else ''} "
+          f"=> {'PASS' if ok else 'FAIL'}", flush=True)
     if not ok:
         raise SystemExit("correctness gate FAILED — the mask is wrong; every downstream number is meaningless.")
 
@@ -466,7 +476,15 @@ def main():
         fr = [r for r in records if r["family"] == fam]
         if not fr:
             continue
-        full = float(np.mean([r["correct"] for r in fr if abs(r["budget"]-1.0) < 1e-9 and r["policy"]=="attention"])) or 1.0
+        # Baseline = attention accuracy at budget 1.0 (keep everything). Every accepted instance
+        # passes the full-cache reference by construction, so when 1.0 isn't swept the baseline is
+        # 1.0 — compute it nan-safely (np.mean([]) is nan, and `nan or 1.0` is nan since bool(nan)
+        # is True, which would silently force iso=1.0 / capacity=1.0×).
+        full_vals = [r["correct"] for r in fr if abs(r["budget"]-1.0) < 1e-9 and r["policy"]=="attention"]
+        if not full_vals:
+            print(f"  [warn] {fam}: budget 1.0 not in --budgets; baseline full_acc assumed 1.0 "
+                  f"(accepted instances pass the full cache by construction).", flush=True)
+        full = float(np.mean(full_vals)) if full_vals else 1.0
         per = {}
         for bf in args.budgets:
             sub = [r for r in fr if abs(r["budget"]-bf) < 1e-9]
