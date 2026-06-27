@@ -45,6 +45,23 @@ def _filler(rng, n):
     return " ".join(rng.choice(_FILLER) for _ in range(n))
 
 
+def _scatter(rng, n_filler, facts):
+    """Interleave fact sentences at ~evenly distributed positions across n_filler filler
+    sentences, so the K facts land on DIFFERENT, far-apart pages (the dense regime: the
+    selector must keep them ALL at once, and recency keeps none of the early ones)."""
+    seg = max(1, n_filler // (len(facts) + 1))
+    out = []
+    for f in facts:
+        out.append(_filler(rng, seg)); out.append(f)
+    out.append(_filler(rng, seg))
+    return " ".join(out)
+
+
+# dense-task breadth: how many distributed spans the answer depends on (all must survive)
+SUM_K = 5        # sum_scattered: addends
+RECALL_K = 6     # recall_all: values to reproduce in order
+
+
 def make_task(family, seed, n_filler):
     """Return (prompt, answer). Progressively harder / less redundant."""
     rng = random.Random(seed)
@@ -76,10 +93,24 @@ def make_task(family, seed, n_filler):
         target = rng.randint(100, 999)
         decoys = " ".join(f"A decoy total is {rng.randint(100,999)}." for _ in range(4))
         return f"{pre} {decoys} The OFFICIAL total is {target}. {decoys} {post} The OFFICIAL total is", f" {target}"
+    if family == "sum_scattered":      # DENSE aggregation: answer depends on EVERY addend page
+        amts = [rng.randint(10, 39) for _ in range(SUM_K)]
+        facts = [f"Ledger entry {i+1}: a deposit of {a} dollars." for i, a in enumerate(amts)]
+        body = _scatter(rng, n_filler, facts)
+        return (f"Bookkeeping log. {body} Adding up every deposit listed above, "
+                f"the total number of dollars is"), f" {sum(amts)}"
+    if family == "recall_all":         # DENSE exact recall (no arithmetic): ALL K codes in order
+        codes = [rng.randint(10, 99) for _ in range(RECALL_K)]
+        facts = [f"Channel {i+1} broadcasts code {c}." for i, c in enumerate(codes)]
+        body = _scatter(rng, n_filler, facts)
+        ans = "".join(f" {c}" for c in codes)
+        return (f"Signal record. {body} Listing the codes for channels 1 through "
+                f"{RECALL_K} in order, they are:"), ans
     raise KeyError(family)
 
 
-FAMILIES = ["single_needle", "exact_long_string", "multi_needle", "multi_hop", "distractor"]
+FAMILIES = ["single_needle", "exact_long_string", "multi_needle", "multi_hop", "distractor",
+            "sum_scattered", "recall_all"]
 
 
 def exact_answer(model, full_caches, query, seq, keep_pages, answer_ids):

@@ -59,8 +59,13 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # 1. quick sanity (gate must PASS, then preflight must print "=> PASS"):
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 5 --n-filler 400
 
-# 2. the real validation: 7B @ ~20k context, all 5 task families (fast engine, default):
+# 2. the real validation: 7B @ ~20k context, all 7 task families (fast engine, default):
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler 1500 --block-size 16
+
+# 2b. THE DENSE TEST (does the 8-16x retrieval number survive when the answer needs MANY
+#     distributed spans?): the two aggregation families alone. Expect a HIGHER iso-budget.
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler 1500 \
+  --families sum_scattered recall_all --block-size 16
 
 # 3. push to ~41k context, and/or a bigger model on the same H100:
 python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct  --n 30 --n-filler 3000
@@ -80,11 +85,20 @@ python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler
    headline = the **worst-task** multiplier (that's the safe budget you'd ship).
 
 ## What this answers
-Whether the local-Mac finding (attention selector holds quality to ~6–12% budget, i.e.
-8–16×, on single-needle COPY) survives at **7B scale + longer context + harder tasks**.
-Hypothesis to test: harder/less-redundant families (multi_hop, distractor, exact_long_string)
-need a HIGHER budget (lower multiplier) → the realistic safe multiplier is likely **2–4×**,
-not 16×. The number this prints IS the honest capacity multiplier to quote.
+The 5 retrieval families (single_needle … distractor) have a SINGLE answer span, so the
+attention selector keeps that one page and holds quality to a tiny budget — measured at
+7B/20k: **6.25% on 4/5 (16×), 12.5% on multi_hop (8×)**.
+
+The **2 dense families are the real stress test.** Their answer depends on MANY spans
+scattered across the whole context that must ALL survive at once:
+- `sum_scattered` — sum of 5 small deposits placed far apart (drop one addend → wrong sum).
+- `recall_all` — reproduce 6 codes in order (drop one → wrong; no arithmetic).
+No single page is query-salient ("the total" doesn't point at any one entry), so the selector
+must spend budget keeping all of them. **Hypothesis: these need a HIGHER iso-budget → a lower
+multiplier (~2–4×), telling you the honest number for aggregation/synthesis workloads** rather
+than the optimistic retrieval 8–16×. The worst-task multiplier across all 7 is the safe one to
+ship. (Note: `sum_scattered` also requires the model to do the arithmetic — instances the full
+cache gets wrong are auto-rejected, so it measures degradation conditional on full-cache success.)
 
 ## Notes
 - This measures selection QUALITY, not kernel speed (full scores computed, then masked).

@@ -55,6 +55,23 @@ def _filler(rng, n):
     return " ".join(rng.choice(_FILLER) for _ in range(n))
 
 
+def _scatter(rng, n_filler, facts):
+    """Interleave fact sentences at ~evenly distributed positions across n_filler filler
+    sentences, so the K facts land on DIFFERENT, far-apart pages (the dense regime: the
+    selector must keep them ALL at once, and recency keeps none of the early ones)."""
+    seg = max(1, n_filler // (len(facts) + 1))
+    out = []
+    for f in facts:
+        out.append(_filler(rng, seg)); out.append(f)
+    out.append(_filler(rng, seg))
+    return " ".join(out)
+
+
+# dense-task breadth: how many distributed spans the answer depends on (all must survive)
+SUM_K = 5        # sum_scattered: addends
+RECALL_K = 6     # recall_all: values to reproduce in order
+
+
 def make_task(family, seed, n_filler):
     rng = random.Random(seed)
     pre, post = _filler(rng, n_filler // 2), _filler(rng, n_filler - n_filler // 2)
@@ -84,10 +101,33 @@ def make_task(family, seed, n_filler):
         tgt = rng.randint(100, 999)
         dec = " ".join(f"A decoy total is {rng.randint(100,999)}." for _ in range(4))
         return f"{pre} {dec} The OFFICIAL total is {tgt}. {dec} {post} The OFFICIAL total is", f" {tgt}"
+    if family == "sum_scattered":
+        # DENSE aggregation: answer = sum of SUM_K small deposits scattered far apart. The
+        # answer depends on EVERY addend page (drop one → wrong sum), and no single page is
+        # query-salient ("the total" doesn't point at any one entry) → the selector must keep
+        # them ALL within budget. Small 2-digit terms keep the full-cache sum solvable.
+        amts = [rng.randint(10, 39) for _ in range(SUM_K)]
+        facts = [f"Ledger entry {i+1}: a deposit of {a} dollars." for i, a in enumerate(amts)]
+        body = _scatter(rng, n_filler, facts)
+        return (f"Bookkeeping log. {body} Adding up every deposit listed above, "
+                f"the total number of dollars is"), f" {sum(amts)}"
+    if family == "recall_all":
+        # DENSE exact recall (no arithmetic): reproduce ALL RECALL_K codes in order. Every
+        # value page must survive simultaneously; large answer space (no lucky guess).
+        codes = [rng.randint(10, 99) for _ in range(RECALL_K)]
+        facts = [f"Channel {i+1} broadcasts code {c}." for i, c in enumerate(codes)]
+        body = _scatter(rng, n_filler, facts)
+        ans = "".join(f" {c}" for c in codes)
+        return (f"Signal record. {body} Listing the codes for channels 1 through "
+                f"{RECALL_K} in order, they are:"), ans
     raise KeyError(family)
 
 
-FAMILIES = ["single_needle", "exact_long_string", "multi_needle", "multi_hop", "distractor"]
+# default = 5 retrieval families + 2 DENSE-integration families (sum_scattered, recall_all);
+# the dense pair is the test of whether the 8-16× retrieval multiplier survives on workloads
+# whose answer depends on MANY distributed spans at once (run them alone with --families).
+FAMILIES = ["single_needle", "exact_long_string", "multi_needle", "multi_hop", "distractor",
+            "sum_scattered", "recall_all"]
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +293,15 @@ def attention_mass_fast(model, template, prompt_ids, n_pages, block_size, device
     return mass
 
 
-def run_preflight(model, tok, rdtype, device, B, budgets, n_check=6):
+def run_preflight(model, tok, rdtype, device, B, budgets, families=FAMILIES):
     """Prove the WHOLE fast path ≡ the validated mask path before trusting any result:
       (a) the fast selector (attention_mass_fast) picks the SAME pages as the mask-path
           selector, and (b) the fast decode reproduces the SAME exact-answer decision on
-          those pages. Abort on any mismatch in either."""
+          those pages. Abort on any mismatch in either. Covers EVERY family in the run at
+          least once (incl. multi-token-answer families like recall_all)."""
     dec_mism = dec_tot = sel_mism = sel_tot = 0
-    for s in range(n_check):
-        fam = FAMILIES[s % len(FAMILIES)]
+    for s in range(max(6, len(families))):
+        fam = families[s % len(families)]
         prompt, answer = make_task(fam, 1000 + s, 80)
         ids = tok(prompt + answer, return_tensors="pt").input_ids.to(device)
         plen = tok(prompt, return_tensors="pt").input_ids.shape[1]
@@ -328,7 +369,7 @@ def main():
 
     if args.engine == "fast":
         print("engine=fast → proving fast≡mask before any result…", flush=True)
-        run_preflight(model, tok, rdtype, device, B, args.budgets, n_check=6)
+        run_preflight(model, tok, rdtype, device, B, args.budgets, families=args.families)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     tag = args.model.split("/")[-1]
