@@ -150,6 +150,11 @@ selector and exact-answer accuracy.
 - **⚠️ Remaining gap before quoting a universal multiplier:** measure a DENSE-integration /
   general-generation workload (summarization, multi-fact synthesis, code; perplexity not just
   exact-answer). 8–16× is the retrieval upper bound; the general number is expected lower.
+- **⚠️ Offline-selector caveat (also an upper bound):** the selector here scores pages by the
+  attention of the *actual query token* over the full prompt — it sees the query. A deployed
+  *streaming* evictor must decide what to drop **before** the query arrives (incrementally, as
+  the cache fills), so it has strictly less information and will do no better. The measured
+  budget is the best-case; an online H2O/SnapKV-style evictor is the realistic floor.
 - No retrieval-head localization observed (multi_hop degrades gracefully with budget, not via
   a few load-bearing heads) — consistent with the holographic finding; latent question stays
   closed at 7B.
