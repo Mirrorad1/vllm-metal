@@ -21,16 +21,22 @@ real serving-capacity win at quality-safe budgets — using a **known technique*
 (eviction), now measured and made safe for this stack. It is **not** a novel
 capability and **not** a clean context extension.
 
-**How big? It depends on the workload, and now we have a real measurement (exp020, 2026-06):**
-on **Qwen2.5-7B at ~20k context**, the deployable attention selector holds exact-answer
-iso-quality down to **6.25% budget on 4/5 retrieval families (16×)** and **12.5% on
-true-2-hop (8×)** — self-proven equal to the validated reference (preflight 60/60). That
-**beats** the earlier conservative ~2–4× extrapolation, but it is an **upper bound for
-sparse-answer retrieval** (one answer span in generic, ignorable filler). General
-generation / dense-context-integration workloads will need a higher budget → a lower
-multiplier, and that number is **still unmeasured**. Quote **8× (worst measured task)** as
-the safe-to-ship retrieval figure; keep **~2–4×** as the conservative number for general
-workloads until measured.
+**How big? It is WORKLOAD-DEPENDENT — now measured at both ends (exp020, 2026-06, Qwen2.5-7B
+@ ~20k, fast engine self-proven ≡ reference, preflight 60/60):**
+- **Sparse-answer RETRIEVAL** (one needle in ignorable filler): attention selector holds
+  iso-quality to **6.25% budget on 4/5 families (16×)** and **12.5% on 2-hop (8×)**.
+- **DENSE AGGREGATION** (answer = a function of many distributed spans — `sum_scattered`, the
+  sum of 5 deposits placed far apart): **iso-budget = 100% → 1.0× capacity. It does not compress
+  at all.** Accuracy falls 1.00→0.69→0.34→0.17 as budget drops 100%→50%→25%→6.25%. The arithmetic
+  is controlled (same instances at every budget), so this is pure page-retention: every addend
+  page is needed and none is query-salient, so the selector can't keep them all under budget.
+
+So the honest headline is **1× (dense aggregation) … 16× (sparse retrieval)** — quote the number
+for YOUR workload, not a single universal figure. This is the workload-level confirmation of the
+holographic finding: when the answer is a function of distributed evidence you cannot evict any of
+it; eviction's big wins are confined to sparse-answer/retrieval traffic. For mixed real workloads,
+the aggregation/synthesis fraction caps you near 1× at iso-quality; **~2–4× remains a reasonable
+blended planning figure**, with 8–16× only for retrieval-dominated traffic.
 
 ---
 
@@ -71,12 +77,16 @@ The three durable findings:
   the deployable attention selector holds exact-answer iso-quality to 6.25% budget on 4/5
   families (16×) and 12.5% on true-2-hop (8×); fast cache-slicing engine self-proved equal
   to the validated mask reference (gate Δ=0, preflight 60/60 decode + 60/60 selector).
-- ⚠️ STILL UNMEASURED — GENERAL WORKLOADS: exp020's tasks are sparse-ANSWER retrieval (a
-  single answer span) in generic IGNORABLE filler — the high-redundancy regime, so 8–16× is
-  an UPPER bound for that task class. Dense-context-integration (summarization, multi-fact
-  synthesis, code) and full-generation quality (perplexity, not just exact-answer) are not
-  yet measured and will need a higher budget → lower multiplier. And this is still SELECTION
-  quality; realized serving throughput needs the upstream wiring (Track A / exp018).
+- ✅ NOW MEASURED — DENSE AGGREGATION DOES NOT COMPRESS: the `sum_scattered` family (answer =
+  sum of 5 deposits scattered across ~20k) holds iso-quality only at **100% budget (1.0×)** —
+  accuracy falls 1.00→0.69→0.34→0.17 as budget drops to 50/25/6.25%, with arithmetic controlled
+  (same instances at every budget). So 8–16× is a sparse-RETRIEVAL ceiling; aggregation/synthesis
+  traffic gets ~1× at iso-quality. The honest multiplier is workload-dependent (1×…16×); ~2–4× is
+  a reasonable blended figure. (recall_all, a non-arithmetic dense check, was unsolvable at full
+  cache on 7B → 0 valid; RECALL_K lowered for an optional confirming run.)
+- ⚠️ STILL UNMEASURED: full-GENERATION quality (perplexity over a long continuation, not just
+  exact-answer), and realized serving THROUGHPUT (still SELECTION quality; needs Track A / exp018
+  wiring to convert the safe budget into concurrent-sequence capacity).
 
 ---
 
@@ -147,9 +157,18 @@ selector and exact-answer accuracy.
   retrieval). The fast cache-slicing engine self-proved equal to the validated mask reference
   (gate Δ=0; preflight 60/60 decode + 60/60 selector). This BEATS the conservative ~2–4×
   hypothesis — because these are sparse-answer tasks (one span) in ignorable filler.
-- **⚠️ Remaining gap before quoting a universal multiplier:** measure a DENSE-integration /
-  general-generation workload (summarization, multi-fact synthesis, code; perplexity not just
-  exact-answer). 8–16× is the retrieval upper bound; the general number is expected lower.
+- **✅ DENSE AGGREGATION MEASURED (the decisive test): 1.0× — does NOT compress.** The
+  `sum_scattered` family (answer = sum of 5 deposits scattered across ~20k; every addend page
+  must survive) holds iso-quality only at 100% budget: attn 1.00→0.69→0.34→0.28→0.17 at
+  100/50/25/12.5/6.25%, recent 0.00 throughout. Arithmetic is controlled (same 29 instances
+  measured at every budget), so this is pure page-retention — the selector helps (0.69@50% ≫
+  random 3%) but can't keep all 5 non-salient distributed addend pages under budget. This
+  confirms the holographic thesis at the workload level: distributed-evidence answers can't be
+  evicted. **Headline is now workload-dependent: 1× (dense) … 16× (sparse retrieval).**
+  (recall_all, a non-arithmetic dense check, was unsolvable at full cache on 7B → 0 valid;
+  RECALL_K lowered 6→3 for an OPTIONAL confirming run.)
+- **⚠️ Remaining gap:** full-generation quality (perplexity over a long continuation, not just
+  exact-answer single spans).
 - **⚠️ Offline-selector caveat (also an upper bound):** the selector here scores pages by the
   attention of the *actual query token* over the full prompt — it sees the query. A deployed
   *streaming* evictor must decide what to drop **before** the query arrives (incrementally, as

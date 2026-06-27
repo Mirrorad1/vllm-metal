@@ -59,7 +59,8 @@ def _scatter(rng, n_filler, facts):
 
 # dense-task breadth: how many distributed spans the answer depends on (all must survive)
 SUM_K = 5        # sum_scattered: addends
-RECALL_K = 6     # recall_all: values to reproduce in order
+RECALL_K = 3     # recall_all: values to reproduce in order (6 was unsolvable even at full
+                 # cache on 7B @20k → 0 valid; 3 gives a baseline. Still validate it accepts >0.)
 
 
 def make_task(family, seed, n_filler):
