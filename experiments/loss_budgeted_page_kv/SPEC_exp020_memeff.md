@@ -36,9 +36,13 @@ context on a single 80 GB GPU.
      output_attentions=True)` → `[1, heads, 1, L]` (O(L)); `set_attn_implementation("sdpa")`.
   3. avg over layers & heads → per-key mass → bin to pages.
 
-### 4D mask (builder unchanged)
-`[1,1,L,L]`: causal everywhere; for ANSWER-query rows (`>= prompt_len`) additionally
-`-inf` at dropped-page key columns. Built in run dtype.
+### 4D mask
+`[1,1,L,L]`: causal everywhere; every DECODE-query row additionally `-inf` at dropped-page
+key columns. Built in run dtype. **Gating starts at row `prompt_len-1`, NOT `prompt_len`** —
+the last prompt token is the first decode query (it predicts answer[0]) and must attend only
+to the kept cache, exactly like the evict-then-decode fast path. Gating from `prompt_len`
+(off-by-one) lets answer[0] see dropped pages and diverges from the fast path at any budget
+< 1.0 (caught by the fp32 logit-level preflight: max|Δ logits| jumped to ~1–10 vs ~1e-4 fixed).
 
 ### logits_to_keep indexing
 `n_keep = len(answer)+1`; the kept window is positions `[prompt_len-1 .. L-1]`, so

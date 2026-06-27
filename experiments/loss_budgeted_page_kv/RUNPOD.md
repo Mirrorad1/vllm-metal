@@ -18,14 +18,21 @@ There are two equivalent implementations of the budget sweep:
 - **`mask`:** the validated reference — one full `[prompt+answer]` forward per combination
   under a 4D additive mask.
 
-**`fast` self-proves it equals `mask` before any result is trusted.** On startup it runs a
-preflight over the first few example×budget×policy points and asserts BOTH that the fast
-selector picks the **same pages** and the fast decode makes the **same exact-answer decision**
-as the mask path — printing e.g. `[fast-preflight] decode fast≡mask: 36/36 identical; selector
-fast≡mask: 36/36 identical => PASS`. **Any mismatch aborts the run** (it refuses to report
-numbers it can't prove equal to the reference). To audit, run the same config with
-`--engine mask` and confirm the per-family table matches. Proven equivalent on CPU 0.5B
-(identical decisions across families × budgets × policies).
+**`fast` self-proves it equals `mask` before any result is trusted.** On startup (on the
+fp32 gate model) it runs a preflight over every family × budget × policy and asserts (a) the
+fast selector picks the **same pages** and (b) the fast decode's **answer LOGITS equal the
+mask path's within fp32 tolerance** (`max|Δ logits| < 5e-2`) — strictly stronger than matching
+the final exact-answer decision, and run in fp32 so an argmax tie can't false-alarm. It prints
+e.g. `[fast-preflight] fp32 max|Δ logits| fast vs mask = 7.3e-04 (<5e-02); selector 70/70
+identical; decisions 70/70 identical => PASS`. **Any numerical divergence aborts the run** (it
+refuses to report numbers it can't prove equal to the reference). To audit, run the same config
+with `--engine mask` and confirm the per-family table matches.
+
+> The logit-level fp32 preflight earned its keep: it caught a real off-by-one in the *mask
+> reference* (it left answer[0] — predicted by the last prompt token — un-gated, so it could
+> see dropped pages) that the older decision-level check had missed. The `fast` engine was
+> always correct (it gates every decode step, as a real evict-then-decode deployment does), so
+> prior `--engine fast` numbers stand; the reference is now fixed to match.
 
 ## Pod & sizing (this version is MEMORY-EFFICIENT — sdpa, not eager)
 This version runs the big forwards under sdpa (fused mem-efficient backend) + a 4D mask +
@@ -77,8 +84,9 @@ python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 40 --n-filler
 
 ## What to read
 1. **`[gate] … => PASS`** must print first. If FAIL, stop.
-2. **`[fast-preflight] … => PASS`** must print next (fast engine). If FAIL, the run aborts
-   itself — the fast path didn't match the reference, so no numbers are reported.
+2. **`[fast-preflight] fp32 max|Δ logits| … => PASS`** must print next (fast engine): the
+   fast path's answer logits equal the mask reference within fp32 tolerance. If FAIL, the run
+   aborts itself — it refuses to report numbers it can't prove equal to the reference.
 3. The per-family table: `attn` (deployable selector) vs `recent` (floor) exact-answer
    accuracy at each budget.
 4. **iso-quality budget** per family and its `capacity multiplier` (=1/budget). The

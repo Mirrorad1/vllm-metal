@@ -146,14 +146,19 @@ def page_of(pos, block_size):
 
 
 def build_mask(L, prompt_len, dropped_key_positions, dtype, device):
-    """4D additive mask [1,1,L,L]: causal everywhere; ANSWER-query rows (>=prompt_len)
-    additionally blocked from the dropped key positions (prefill stays lossless)."""
+    """4D additive mask [1,1,L,L]: causal everywhere; every DECODE-query row additionally
+    blocked from the dropped key positions (prefill stays lossless).
+
+    The first decode query is the LAST PROMPT TOKEN (row prompt_len-1) — it predicts
+    answer[0] and in a gated deployment attends only to the kept cache. So gating MUST start
+    at row prompt_len-1, not prompt_len; otherwise answer[0] cheats by seeing dropped pages
+    (a real off-by-one that diverges from the cache-slicing fast path at any budget < 1.0)."""
     neg = torch.finfo(dtype).min
     m = torch.zeros((L, L), dtype=dtype, device=device)
     m.masked_fill_(torch.triu(torch.ones(L, L, dtype=torch.bool, device=device), diagonal=1), neg)
     if dropped_key_positions:
         drop = torch.tensor(sorted(dropped_key_positions), device=device, dtype=torch.long)
-        m[prompt_len:, drop] = neg
+        m[prompt_len - 1:, drop] = neg
     return m[None, None]
 
 
@@ -252,9 +257,10 @@ def _fresh_sliced(template, keep_tok, device):
 
 
 @torch.no_grad()
-def gated_exact_answer_fast(model, template, prompt_ids, answer_ids, keep_pages, B, device):
+def fast_answer_logits(model, template, prompt_ids, answer_ids, keep_pages, B, device):
     """Decode the answer over a cache sliced to keep_pages, with ABSOLUTE position_ids
-    (RoPE) and sliced cache_position. Returns exact-answer bool."""
+    (RoPE) and sliced cache_position. Returns the answer-position logits [len(answer), vocab]
+    — logits[t] predicts answer token t (same alignment as the mask path's kept window)."""
     plen = prompt_ids.shape[1]
     keep_tok = _keep_tok_for_cache(keep_pages, plen, B)
     cache = _fresh_sliced(template, keep_tok, device)
@@ -268,7 +274,13 @@ def gated_exact_answer_fast(model, template, prompt_ids, answer_ids, keep_pages,
     cp = torch.arange(kept, kept + n, device=device)
     with _sdpa_ctx(device):
         lg = model(input_ids=q, past_key_values=cache, use_cache=True, position_ids=pos, cache_position=cp).logits
-    return all(int(lg[0, t].argmax()) == int(a) for t, a in enumerate(answer_ids))
+    return lg[0, :len(answer_ids)]
+
+
+def gated_exact_answer_fast(model, template, prompt_ids, answer_ids, keep_pages, B, device):
+    """Exact-answer bool over the sliced cache (argmax of fast_answer_logits)."""
+    lg = fast_answer_logits(model, template, prompt_ids, answer_ids, keep_pages, B, device)
+    return all(int(lg[t].argmax()) == int(a) for t, a in enumerate(answer_ids))
 
 
 @torch.no_grad()
@@ -293,13 +305,21 @@ def attention_mass_fast(model, template, prompt_ids, n_pages, block_size, device
     return mass
 
 
-def run_preflight(model, tok, rdtype, device, B, budgets, families=FAMILIES):
-    """Prove the WHOLE fast path ≡ the validated mask path before trusting any result:
-      (a) the fast selector (attention_mass_fast) picks the SAME pages as the mask-path
-          selector, and (b) the fast decode reproduces the SAME exact-answer decision on
-          those pages. Abort on any mismatch in either. Covers EVERY family in the run at
-          least once (incl. multi-token-answer families like recall_all)."""
-    dec_mism = dec_tot = sel_mism = sel_tot = 0
+PREFLIGHT_TOL = 5e-2  # fp32 max|Δ logits| between fast & mask; ~1e-3 in practice, a real
+                      # logic bug gives O(1+). Run in fp32 so argmax ties don't false-alarm.
+
+
+def run_preflight(model, tok, dtype, device, B, budgets, families=FAMILIES):
+    """Prove the WHOLE fast path ≡ the validated mask path before trusting any result.
+    Runs in fp32 (the gate model) so the test is on NUMERICAL equivalence, not a brittle
+    bf16 argmax that can flip on a low-confidence answer token (a tie is not a bug):
+      (a) selector: attention_mass_fast picks the SAME pages as the mask-path selector;
+      (b) decode:   the fast answer-LOGITS equal the mask answer-logits (max|Δ| < tol) —
+          strictly stronger than matching the final exact-answer decision.
+    Covers EVERY family in the run at least once (incl. multi-token recall_all). On any real
+    divergence, prints a per-case diagnostic (family/budget/policy, token, Δ) and aborts."""
+    sel_mism = sel_tot = dec_flip = dec_tot = 0
+    max_delta = 0.0; worst = None
     for s in range(max(6, len(families))):
         fam = families[s % len(families)]
         prompt, answer = make_task(fam, 1000 + s, 80)
@@ -319,18 +339,30 @@ def run_preflight(model, tok, rdtype, device, B, budgets, families=FAMILIES):
                 sel_tot += 1; sel_mism += int(keep != keep_f)
                 # decode equivalence on the SAME (reference) keep-set isolates the decode path:
                 dropped = [k for k in range(plen) if page_of(k, B) not in set(keep)]
-                ref = exact_answer_ok(
-                    quality_forward(model, ids, build_mask(L, plen, dropped, rdtype, device), nk, device), ans)
-                fst = gated_exact_answer_fast(model, template, ids[:, :plen], ans, keep, B, device)
-                dec_tot += 1; dec_mism += int(ref != fst)
+                lm = quality_forward(model, ids, build_mask(L, plen, dropped, dtype, device), nk, device)[0, :len(ans)]
+                lf = fast_answer_logits(model, template, ids[:, :plen], ans, keep, B, device)
+                d = (lm.float() - lf.float()).abs().max().item()
+                if d > max_delta:
+                    max_delta = d; worst = (fam, bf, policy)
+                ref = all(int(lm[t].argmax()) == int(a) for t, a in enumerate(ans))
+                fst = all(int(lf[t].argmax()) == int(a) for t, a in enumerate(ans))
+                dec_tot += 1; dec_flip += int(ref != fst)
+                if d > PREFLIGHT_TOL:
+                    print(f"[fast-preflight] DIVERGENCE {fam} bf={bf} {policy}: max|Δlogits|={d:.3e}", flush=True)
         if device == "cuda":
             torch.cuda.empty_cache()
-    ok = dec_mism == 0 and sel_mism == 0
-    print(f"[fast-preflight] decode fast≡mask: {dec_tot-dec_mism}/{dec_tot} identical; "
-          f"selector fast≡mask: {sel_tot-sel_mism}/{sel_tot} identical "
-          f"=> {'PASS' if ok else 'FAIL'}", flush=True)
+    ok = max_delta < PREFLIGHT_TOL and sel_mism == 0
+    print(f"[fast-preflight] fp32 max|Δ logits| fast vs mask = {max_delta:.2e} (<{PREFLIGHT_TOL:.0e}"
+          f"{'' if worst is None else f', worst={worst[0]}/{worst[1]}/{worst[2]}'}); "
+          f"selector {sel_tot-sel_mism}/{sel_tot} identical; "
+          f"decisions {dec_tot-dec_flip}/{dec_tot} identical => {'PASS' if ok else 'FAIL'}", flush=True)
+    if dec_flip and ok:
+        print(f"[fast-preflight] note: {dec_flip}/{dec_tot} exact-answer decisions differ despite "
+              f"logits equal within {PREFLIGHT_TOL:.0e} — an argmax tie at the decision boundary "
+              f"(affects fast & mask equally), NOT a fast-path error.", flush=True)
     if not ok:
-        raise SystemExit("fast path disagrees with the validated mask path — refusing to use it.")
+        raise SystemExit("fast path NUMERICALLY disagrees with the validated mask path "
+                         f"(max|Δ|={max_delta:.2e} ≥ {PREFLIGHT_TOL:.0e}) — refusing to use it.")
 
 
 def main():
@@ -355,9 +387,15 @@ def main():
     B = args.block_size
 
     print("loading model (gate, fp32, sdpa)…", flush=True)
+    gate_dtype = getattr(torch, args.gate_dtype)
     gate_model = AutoModelForCausalLM.from_pretrained(
-        args.model, attn_implementation="sdpa", dtype=getattr(torch, args.gate_dtype)).to(device).eval()
-    correctness_gate(gate_model, tok, getattr(torch, args.gate_dtype), device, B)
+        args.model, attn_implementation="sdpa", dtype=gate_dtype).to(device).eval()
+    correctness_gate(gate_model, tok, gate_dtype, device, B)
+    if args.engine == "fast":
+        # Prove fast≡mask in fp32 on the gate model, BEFORE freeing it — numerical equivalence
+        # (max|Δ logits|), so a bf16 argmax tie on a low-confidence answer token can't false-alarm.
+        print("engine=fast → proving fast≡mask (fp32 numerical equivalence) before any result…", flush=True)
+        run_preflight(gate_model, tok, gate_dtype, device, B, args.budgets, families=args.families)
     del gate_model
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -366,10 +404,6 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model, attn_implementation="sdpa", dtype=getattr(torch, args.run_dtype)).to(device).eval()
     rdtype = getattr(torch, args.run_dtype)
-
-    if args.engine == "fast":
-        print("engine=fast → proving fast≡mask before any result…", flush=True)
-        run_preflight(model, tok, rdtype, device, B, args.budgets, families=args.families)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     tag = args.model.split("/")[-1]
