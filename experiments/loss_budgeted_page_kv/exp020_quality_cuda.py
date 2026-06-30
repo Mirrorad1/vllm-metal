@@ -451,6 +451,13 @@ def main():
                 raw.write(json.dumps({"event": "oom", "fam": fam, "L": int(L), "err": str(e)[:120]}) + "\n")
                 torch.cuda.empty_cache(); continue
             acc += 1
+            inst_seed = seed - 1  # stable per-instance id (the seed make_task used above)
+            # exp021 admission-controller features (additive; existing records byte-identical):
+            # dump the query-AGNOSTIC per-page attention mass ONCE per accepted instance, so the
+            # write-side compressibility predictor can be built OFFLINE from this run (no re-forward).
+            raw.write(json.dumps({"event": "instance", "family": fam, "seed": int(inst_seed),
+                                  "P": int(n_pages), "L": int(L), "block_size": int(B),
+                                  "mass": [float(x) for x in np.asarray(mass).ravel()]}) + "\n")
             for bf in args.budgets:
                 for policy in ("attention", "recent"):
                     keep = select_pages(policy, n_pages, bf, mass)
@@ -461,7 +468,7 @@ def main():
                         dropped = [k for k in range(prompt_len) if page_of(k, B) not in set(keep)]
                         lg = quality_forward(model, ids_full, build_mask(L, prompt_len, dropped, rdtype, device), n_keep, device)
                         correct = exact_answer_ok(lg, answer_ids); del lg
-                    rec = {"family": fam, "budget": bf, "policy": policy,
+                    rec = {"family": fam, "seed": int(inst_seed), "budget": bf, "policy": policy,
                            "J": len(keep), "P": n_pages, "L": int(L), "correct": bool(correct)}
                     records.append(rec); raw.write(json.dumps(rec) + "\n")
             if args.engine == "fast":

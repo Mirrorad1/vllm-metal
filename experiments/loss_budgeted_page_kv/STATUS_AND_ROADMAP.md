@@ -178,11 +178,32 @@ selector and exact-answer accuracy.
   a few load-bearing heads) — consistent with the holographic finding; latent question stays
   closed at 7B.
 
+### Track C — compressibility ADMISSION CONTROLLER / safety wrapper [SCAFFOLD SHIPPED]
+
+Given Track B's headline (1× dense … 16× sparse), a fixed serving budget **silently
+over-compresses** the holographic regime (dense aggregation served at 25% → ~0.34 acc while the
+caller was promised iso-quality). **exp021** builds the safety object that prices that gap
+*before* serving: a per-region, **query-agnostic, write-side, CONFORMAL** certificate of
+answer-level damage, wired as *admit-at-B / escalate / refuse*. Needs to beat **no compression
+frontier** (it's a safety wrapper), and it directly **closes the offline-selector caveat above**
+(the query-agnostic write-side version IS the realistic streaming floor).
+- The decisive question (HORN-B): does the answer-level certificate **beat free attention-mass
+  entropy**? Predicted **KILL k1** (exp006/011: attention-mass == KL-damage oracle ⇒ entropy
+  likely already separates) — which is a *good* cheap outcome: it hands you a calibrated entropy
+  admission gate (which no serving stack ships) and closes the question.
+- **Status:** `exp021_admission.py` self-verified (selftest WIN when a mechanism is planted +
+  negative control KILL k1 when entropy suffices; conformal coverage held both ways); exp020
+  instrumented (additive per-instance `mass` dump). **Cut 1** = one instrumented exp020 re-run →
+  `python exp021_admission.py --runs results/<run>/raw_*.jsonl --budget 0.25` (offline, local).
+  See `SPEC_exp021_admission.md`.
+
 ### Recommended order
 1. **Track B first** (cheap, decisive on the real number) if a 7B+ box is available —
    it sets honest expectations and de-risks Track A's value.
 2. **Track A** to ship the capacity feature, sized to Track B's safe budget.
-3. If Track B reveals retrieval-head localization at scale, branch back to the latent
+3. **Track C** (exp021 Cut 1) is one re-run + a local script — the cheapest of the three and it
+   closes the offline-selector caveat; run it alongside Track B's re-runs.
+4. If Track B reveals retrieval-head localization at scale, branch back to the latent
    search (the only thing that would revive "clever selection").
 
 ---

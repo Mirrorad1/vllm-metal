@@ -113,3 +113,43 @@ cache gets wrong are auto-rejected, so it measures degradation conditional on fu
 - It's leak-free: the selector uses only attention mass / recency, never the answer label.
 - Compare the printed iso-budget to `results/exp020_quality/` (the 0.5B local run).
 - Pairs with the `jax-cuda-runpod-gpu` skill for pod mechanics (runpodctl, repo clone).
+
+---
+
+# exp021 — conformal compressibility ADMISSION CONTROLLER (the HORN-B verdict)
+
+`exp020_quality_cuda.py` now ALSO dumps, per accepted instance, the query-agnostic per-page
+attention `mass` (one `{"event":"instance",...}` line) — the write-side feature the admission
+controller needs. `exp021_admission.py` then builds a split-conformal "admit-at-B / refuse"
+gate OFFLINE from that jsonl (CPU only) and answers the decisive question (SPEC_exp021_admission.md):
+**does the answer-level certificate BEAT free attention-entropy (HORN-B)?**
+
+The 0.5B local run was DEGENERATE (0.5B can't do dense aggregation → too few break events).
+The real verdict needs 7B, where `sum_scattered` has a population AND tight budgets create
+damage variance.
+
+```bash
+# extra deps (the gate is CPU/offline numpy/scipy/sklearn):
+pip install scipy scikit-learn
+
+# 0. sanity: the harness must self-verify before you trust any verdict (no GPU needed):
+python exp021_admission.py --selftest          # must print: PASS
+
+# 1. generate features+labels with the INSTRUMENTED exp020. Include sparse families for
+#    contrast with the dense (sum_scattered) regime where the admission decision matters:
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+python exp020_quality_cuda.py --model Qwen/Qwen2.5-7B-Instruct --n 60 --n-filler 1500 \
+  --families single_needle multi_needle multi_hop sum_scattered --block-size 16 \
+  --out results/exp021_7b
+
+# 2. the verdict (offline, seconds). Budget = the compression you'd actually serve at:
+python exp021_admission.py --runs results/exp021_7b/raw_Qwen2.5-7B-Instruct.jsonl --budget 0.0625
+python exp021_admission.py --runs results/exp021_7b/raw_Qwen2.5-7B-Instruct.jsonl --budget 0.25
+```
+
+Read the VERDICT line:
+- **WIN (H2)** — the answer-level certificate beats entropy → a real new mechanism.
+- **KILL k1** — entropy threshold matches it → a calibrated entropy admission gate (deployable,
+  unshipped today, but NOT novel). The predicted outcome, given attention-mass == KL-oracle.
+- **DEGENERATE / NOT EVALUABLE** — too few break events (raise `--n`, or pick a budget where
+  `sum_scattered` actually breaks, e.g. 0.0625). Not a verdict, just insufficient damage variance.
