@@ -148,8 +148,51 @@ python exp021_admission.py --runs results/exp021_7b/raw_Qwen2.5-7B-Instruct.json
 ```
 
 Read the VERDICT line:
-- **WIN (H2)** — the answer-level certificate beats entropy → a real new mechanism.
+- **WIN (H2)** — the answer-level certificate beats entropy AND carries per-instance signal
+  within task type (family-centered AUC ≥ 0.65) → a real new mechanism.
+- **WIN-MIX / KILL k4 (FINGERPRINT)** — beats entropy but only by identifying the TASK FAMILY;
+  within-family signal ≈ chance. **This is what the 7B/20k run returned** (+0.206@6.25%,
+  +0.267@25%, coverage held; family-ID AUC 1.00 on multi_hop-vs-sum_scattered where entropy is
+  blind; centered AUC 0.42). Deployable as a task-type admission gate over a stationary mix;
+  NOT a per-context damage certificate; no transfer to unseen task types.
 - **KILL k1** — entropy threshold matches it → a calibrated entropy admission gate (deployable,
-  unshipped today, but NOT novel). The predicted outcome, given attention-mass == KL-oracle.
+  unshipped today, but NOT novel).
 - **DEGENERATE / NOT EVALUABLE** — too few break events (raise `--n`, or pick a budget where
   `sum_scattered` actually breaks, e.g. 0.0625). Not a verdict, just insufficient damage variance.
+
+---
+
+# exp022 — the substrate matrix (L40S, ~$5, one afternoon)
+
+Is the wall substrate-shaped or context-shaped? `exp022_substrates.py` fills the
+per-context loss matrix at iso-bits (eviction / 4-2bit quant / low-rank SVD / per-context
+LoRA) over the SAME 225 contexts as the archived 7B run (instance list read from
+`results/exp021_7b/raw_*.jsonl`, committed). Pod: **1x L40S 48GB** ("PyTorch 2.x / CUDA"
+template). All gates self-prove (g1 full-cache, g2 identity no-ops, g3 sensitivity,
+g4 recomputed eviction labels must match the archived H100 labels >=90%).
+
+```bash
+export GH_PAT=github_pat_xxxx
+cd /workspace
+git clone --depth 1 -b kv-loss-budgeted-experiments https://${GH_PAT}@github.com/Mirrorad1/vllm-metal.git
+cd vllm-metal/experiments/loss_budgeted_page_kv
+pip install -q torch "transformers>=5.0" accelerate peft numpy scipy scikit-learn
+export HF_HOME=/workspace/hf
+
+# 1. quantization + low-rank + eviction-recheck columns (~1h; watch the 4 gates)
+python exp022_substrates.py --stage s23
+
+# 2. LoRA (weights) column, 60 contexts (~3h). To fan across N pods: --shard k/N on each.
+python exp022_substrates.py --stage s4
+
+# 3. ship results home, then verdict runs OFFLINE on the Mac:
+runpodctl send results/exp022_7b
+#   (locally) runpodctl receive <code> ; python exp022_matrix.py --dir results/exp022_7b
+```
+
+Verdict line meanings:
+- **H-GENERAL** — no substrate rescues the eviction-wall contexts: incompressibility is a
+  property of the CONTEXT. Distillation dies with it => build the re-read fallback (L2).
+- **H-SPECIFIC** — substrates fail on different contexts: the admission gate upgrades to a
+  substrate DISPATCHER (section F shows how much a type-level dispatch captures).
+- **DEGENERATE** — dense families didn't break under eviction: wrong model/scale, not a verdict.

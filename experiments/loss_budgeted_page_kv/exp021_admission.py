@@ -13,6 +13,11 @@ admission gate, and answer the one decisive question:
     entropy): a real new mechanism (new-combination).
   * If NO (entropy matches it): a calibrated entropy admission gate -- still deployable
     and unshipped, but NOT novel. Either way you learn it cheaply, with no GPU.
+  * THIRD OUTCOME (found on the real 7B data): the gate beats entropy but ONLY by
+    fingerprinting the TASK FAMILY (whose identity determines break rate), with zero
+    per-instance damage signal within a family. Sound & deployable on a STATIONARY task
+    mix, but not the H2 mechanism and no reason to transfer to unseen task types. The
+    MECHANISM check below (family-centered AUC) separates this from a true H2 WIN.
 
 Two run modes:
   python exp021_admission.py --selftest            # validate the harness TODAY, no data
@@ -125,6 +130,50 @@ def fit_score(train_rows, train_y, eval_rows, feats):
     return lr.predict_proba(sc.transform(Xev))[:, 1]
 
 
+def _cv_scores(rows, y, feats, folds=5, seed=0):
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(len(rows))
+    sc = np.zeros(len(rows))
+    for k in range(folds):
+        te = idx[k::folds]
+        tr = np.setdiff1d(idx, te)
+        if len(np.unique(y[tr])) < 2:
+            sc[te] = float(y[tr].mean())
+            continue
+        sc[te] = fit_score([rows[i] for i in tr], y[tr], [rows[i] for i in te], feats)
+    return sc
+
+
+def mechanism_check(rows, y, seed=0):
+    """Fingerprint-vs-mechanism: does the certificate carry PER-INSTANCE damage signal,
+    or only task-type identity? Returns (centered_auc, {family: within_family_auc}).
+    centered_auc: CV AUC after subtracting each family's feature means -- this deletes
+    every family fingerprint and keeps only within-type variation. A gate that wins by
+    task-ID alone lands ~0.5 here even while the mix-level gate looks great."""
+    if not _HAVE_SK:
+        return None, {}
+    from sklearn.metrics import roc_auc_score
+    fams = np.array([r.get("family", "?") for r in rows])
+    y = np.asarray(y, float)
+    per_fam = {}
+    for fam in sorted(set(fams)):
+        m = fams == fam
+        if len(np.unique(y[m])) < 2 or m.sum() < 10:
+            per_fam[fam] = None
+            continue
+        sc = _cv_scores([r for r, mm in zip(rows, m) if mm], y[m], FEATURES, seed=seed)
+        per_fam[fam] = float(roc_auc_score(y[m], sc))
+    if len(np.unique(y)) < 2:
+        return None, per_fam
+    X = _matrix(rows, FEATURES).copy()
+    for fam in set(fams):
+        m = fams == fam
+        X[m] -= X[m].mean(axis=0)
+    rows_c = [{f: X[i, j] for j, f in enumerate(FEATURES)} for i in range(len(rows))]
+    sc = _cv_scores(rows_c, y, FEATURES, seed=seed)
+    return float(roc_auc_score(y, sc)), per_fam
+
+
 # ---------------------------------------------------------------------------
 # evaluation: full vs entropy controller, over random train/cal/test folds
 # ---------------------------------------------------------------------------
@@ -168,6 +217,10 @@ def evaluate(rows, y, alpha=0.1, delta=0.1, folds=40, seed=0):
            "paired_gain_se": float(g.std(ddof=1) / math.sqrt(len(g))) if len(g) > 1 else float("inf")}
     for name in ("full", "entropy"):
         res[name] = {m: (float(np.mean(v)), float(np.std(v))) for m, v in out[name].items()}
+    res["mech_centered_auc"], res["mech_per_family"] = mechanism_check(rows, y)
+    fams = np.array([r.get("family", "?") for r in rows])
+    res["family_break"] = {f: (int((fams == f).sum()), float(y[fams == f].mean()))
+                           for f in sorted(set(fams))}
     return res
 
 
@@ -186,11 +239,26 @@ def report(res, title="exp021 admission controller"):
     rho = res["spearman_full_vs_entropy"]
     gain, se = res["paired_gain_mean"], res["paired_gain_se"]
     print(f"\nHORN-B: PAIRED efficiency gain (full - entropy) = {gain:+.3f} ± {2*se:.3f} (2 SE);  "
-          f"rho(full,entropy)={rho:.3f}")
+          f"rho(full,entropy)={rho:+.3f}")
+    mech_auc = res.get("mech_centered_auc")
+    pf = res.get("mech_per_family") or {}
+    fb = res.get("family_break") or {}
+    if fb:
+        print("families: " + "  ".join(f"{f}(n={n},break={b:.2f})" for f, (n, b) in fb.items()))
+    if pf:
+        wf = "  ".join(f"{f}={a:.2f}" if a is not None else f"{f}=n/a" for f, a in pf.items())
+        ca = f"{mech_auc:.3f}" if mech_auc is not None else "n/a"
+        print(f"MECHANISM (per-instance vs fingerprint): within-family AUC [{wf}]; "
+              f"family-centered AUC={ca} (fingerprint-only gates land ~0.5 here)")
     sound = cf <= res["alpha"] + 0.02
-    # a real mechanism: gain is BOTH statistically separated from 0 (paired) AND materially
-    # large (>3pp), AND the answer-level score is not just the entropy signal (rho not ~1).
-    beats = bool(gain > max(3 * se, 0.03) and rho < 0.8)
+    # a real H2 mechanism needs ALL of: gain statistically separated from 0 (paired) and
+    # materially large (>3pp); score not a monotone re-dressing of entropy (|rho| not ~1 --
+    # sign flips count, hence abs); and PER-INSTANCE signal surviving family-mean centering
+    # (otherwise the gate is a task-type classifier riding a family-stratified break rate).
+    gain_sig = bool(gain > max(3 * se, 0.03))
+    redundant = bool(abs(rho) >= 0.8) if not math.isnan(rho) else False
+    has_mech = mech_auc is not None and mech_auc >= 0.65
+    beats = gain_sig and has_mech
     eff_full = res["full"]["efficiency"][0]
     eff_ent = res["entropy"]["efficiency"][0]
     degenerate = max(eff_full, eff_ent) < 0.02 or res["base_break_rate"] < 0.02 or res["n"] < 40
@@ -207,11 +275,20 @@ def report(res, title="exp021 admission controller"):
     elif not sound:
         verdict = "KILL k2/k3: coverage not held (vacuous or unsound) -- see SPEC."
     elif beats:
-        verdict = "WIN (H2): answer-level certificate BEATS entropy -> new mechanism."
+        verdict = ("WIN (H2): answer-level certificate BEATS entropy AND carries per-instance "
+                   "damage signal within task type -> new mechanism.")
+    elif gain_sig:
+        verdict = (f"WIN-MIX / KILL k4 (FINGERPRINT): gate beats entropy (+{gain:.3f}) but ONLY by "
+                   f"identifying the TASK FAMILY (family-centered AUC={mech_auc if mech_auc is None else round(mech_auc,3)}, "
+                   f"~chance within type{'; |rho|>=0.8 vs entropy' if redundant else ''}). Sound and "
+                   f"deployable as a conformal admission gate over THIS stationary task mix, but it is "
+                   f"a task-type classifier, NOT a per-context damage certificate; no transfer to "
+                   f"unseen task types should be assumed (H2 mechanism NOT demonstrated).")
     else:
         verdict = "KILL k1 (HORN-B): entropy threshold matches it -> calibrated-entropy gate, NOT novel."
     print(f"VERDICT: {verdict}\n")
     return {"sound": sound, "beats_entropy": beats, "gain": gain, "rho": rho,
+            "mech_auc": mech_auc, "fingerprint": bool(gain_sig and not has_mech),
             "informative": res.get("features_informative", True)}
 
 

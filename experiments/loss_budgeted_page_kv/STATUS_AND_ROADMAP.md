@@ -178,7 +178,7 @@ selector and exact-answer accuracy.
   a few load-bearing heads) — consistent with the holographic finding; latent question stays
   closed at 7B.
 
-### Track C — compressibility ADMISSION CONTROLLER / safety wrapper [SCAFFOLD SHIPPED]
+### Track C — compressibility ADMISSION CONTROLLER / safety wrapper [RUN AT 7B — FINGERPRINT VERDICT]
 
 Given Track B's headline (1× dense … 16× sparse), a fixed serving budget **silently
 over-compresses** the holographic regime (dense aggregation served at 25% → ~0.34 acc while the
@@ -191,11 +191,33 @@ frontier** (it's a safety wrapper), and it directly **closes the offline-selecto
   entropy**? Predicted **KILL k1** (exp006/011: attention-mass == KL-damage oracle ⇒ entropy
   likely already separates) — which is a *good* cheap outcome: it hands you a calibrated entropy
   admission gate (which no serving stack ships) and closes the question.
-- **Status:** `exp021_admission.py` self-verified (selftest WIN when a mechanism is planted +
-  negative control KILL k1 when entropy suffices; conformal coverage held both ways); exp020
-  instrumented (additive per-instance `mass` dump). **Cut 1** = one instrumented exp020 re-run →
-  `python exp021_admission.py --runs results/<run>/raw_*.jsonl --budget 0.25` (offline, local).
+- **Status: RUN at 7B/20k (n=225, 4 families, `results/exp021_7b/`). Verdict = WIN-MIX / KILL k4
+  (FINGERPRINT)** — a third outcome neither horn named. The full certificate DOES beat entropy
+  (+0.206 eff at B=6.25%, +0.267 at B=25%, ~13–18 SE, coverage held ≤α both arms), but the
+  ablation attack shows the entire gain is TASK-TYPE identification: features separate
+  multi_hop from sum_scattered perfectly (family-ID AUC 1.00) where entropy is blind
+  (eff_page_count ≈21.5 vs ≈22.1, AUC 0.54), while WITHIN family the per-instance damage
+  signal is zero (within-family AUC 0.35–0.55; family-mean-centered AUC 0.42 ≈ chance).
+  Two theory notes: (a) the entropy signal's sign INVERTS at 7B — safe needle families have
+  HIGHER eff_page_count (31–39) than breaking dense ones (~22); (b) F1/F3 saturation stands at
+  the per-instance level. So: a conformal task-type admission gate is sound and deployable over
+  a STATIONARY task mix, but there is NO per-context damage certificate in these features —
+  don't expect transfer to unseen task types. Verdict logic in `exp021_admission.py` now runs
+  this fingerprint check automatically (family-centered AUC; `|rho|` tell fixed).
   See `SPEC_exp021_admission.md`.
+- **exp021_proxy (L6 Cut 1) — WIN at both budgets.** The type bit TRANSFERS DOWN 14× in scale:
+  a 0.5B proxy prefilling the same 225 contexts (byte-identical regeneration, page-aligned,
+  local M3/MPS ~25s/inst, `exp021_proxy_local.py`) reproduces the family-ID signal (AUC 0.995
+  vs the 7B's 1.000 on the entropy-blind multi_hop/sum_scattered pair), predicts 7B break at
+  AUC 0.934, and a conformal gate on PROXY features reaches **93% of the target-feature gate**
+  at coverage ≤ α (0.698 vs 0.754 @B=6.25%; 0.770 vs 0.831 @B=25%). Transfer is NOT
+  competence-gated: AUC 0.81 on instances the proxy answers WRONG (it fails sum_scattered 93%
+  yet its attention still reads the type). Cross-scale feature invariance is strong (entropy
+  rho 0.95 pooled / 0.80 within-family). ⇒ the admit/route bit is available BEFORE target
+  prefill at ~1/14 the FLOPs — the missing precondition for quality-tiered routing
+  (compressed-replica vs full-KV-replica). `exp021_transfer.py` (T0 positive control
+  reproduces the 7B numbers through its own join). Same caveat as above: type-level,
+  stationary mix.
 
 ### Recommended order
 1. **Track B first** (cheap, decisive on the real number) if a 7B+ box is available —
