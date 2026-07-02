@@ -172,9 +172,8 @@ template). All gates self-prove (g1 full-cache, g2 identity no-ops, g3 sensitivi
 g4 recomputed eviction labels must match the archived H100 labels >=90%).
 
 ```bash
-export GH_PAT=github_pat_xxxx
 cd /workspace
-git clone --depth 1 -b kv-loss-budgeted-experiments https://${GH_PAT}@github.com/Mirrorad1/vllm-metal.git
+git clone --depth 1 -b kv-loss-budgeted-experiments https://github.com/Mirrorad1/vllm-metal.git
 cd vllm-metal/experiments/loss_budgeted_page_kv
 pip install -q torch "transformers>=5.0" accelerate peft numpy scipy scikit-learn
 export HF_HOME=/workspace/hf
