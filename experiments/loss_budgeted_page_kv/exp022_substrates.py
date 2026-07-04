@@ -324,10 +324,21 @@ def run_s4(args, model, tok, device, dtype):
             picks += by_fam.get(fam, [])[:args.s4_per_family]
     k, N = (int(x) for x in args.shard.split("/"))
     picks = picks[k - 1::N]
-    print(f"[s4] shard {k}/{N}: {len(picks)} contexts")
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    raw = open(out / f"s4_shard{k}of{N}.jsonl", "w")
+    outf = out / f"s4_shard{k}of{N}.jsonl"
+    done = set()
+    if args.resume and outf.exists():
+        for line in open(outf):
+            d = json.loads(line)
+            done.add((d["family"], d["seed"]))
+    raw = open(outf, "a" if args.resume else "w")
+    print(f"[s4] shard {k}/{N}: {len(picks)} contexts ({len(done)} already done, resumed)"
+          if done else f"[s4] shard {k}/{N}: {len(picks)} contexts")
+    print(f"[s4] recipe: epochs={args.s4_epochs} lr={args.s4_lr} alpha-ratio={args.s4_alpha_ratio} "
+          f"chunk={args.s4_chunk} overlap=64")
     for i, (fam, seed, B) in enumerate(picks):
+        if (fam, seed) in done:
+            continue
         p, a = X.make_task(fam, seed, args.n_filler)
         q_only = p[p.rfind(". ") + 2:]
         assert 0 < len(q_only) < 200, f"question-tail extraction failed for {fam}"
@@ -347,7 +358,7 @@ def run_s4(args, model, tok, device, dtype):
             lgf = model(input_ids=ids_q).logits[0].float()
         floor = all(int(lgf[plen_q - 1 + t].argmax()) == int(x) for t, x in enumerate(ans_q))
 
-        cfg = LoraConfig(r=r, lora_alpha=2 * r, target_modules=tgt, lora_dropout=0.0,
+        cfg = LoraConfig(r=r, lora_alpha=args.s4_alpha_ratio * r, target_modules=tgt, lora_dropout=0.0,
                          task_type="CAUSAL_LM")
         pm = get_peft_model(model, cfg)
         for _, prm in pm.named_parameters():   # fp32 adapters on a bf16 base (peft casts x)
@@ -355,7 +366,8 @@ def run_s4(args, model, tok, device, dtype):
                 prm.data = prm.data.float()
         pm.train()
         opt = torch.optim.AdamW((q for q in pm.parameters() if q.requires_grad), lr=args.s4_lr)
-        chunks = [ctx_ids[s:s + args.s4_chunk] for s in range(0, ctx_ids.shape[0], args.s4_chunk)]
+        step_sz = max(64, args.s4_chunk - 64)   # 64-token overlap: no fact straddles a boundary unseen
+        chunks = [ctx_ids[s:s + args.s4_chunk] for s in range(0, ctx_ids.shape[0], step_sz)]
         rng = np.random.default_rng(seed)
         t0 = time.time()
         step = 0
@@ -399,7 +411,9 @@ def main():
     ap.add_argument("--shard", default="1/1", help="k/N for s4 across pods")
     ap.add_argument("--s4-per-family", type=int, default=20)
     ap.add_argument("--s4-budget", type=float, default=0.25)
-    ap.add_argument("--s4-epochs", type=int, default=4)
+    ap.add_argument("--s4-epochs", type=int, default=10)
+    ap.add_argument("--s4-alpha-ratio", type=int, default=8)
+    ap.add_argument("--resume", action="store_true", help="skip (family,seed) already in the shard output")
     ap.add_argument("--s4-chunk", type=int, default=512)
     ap.add_argument("--s4-lr", type=float, default=2e-4)
     ap.add_argument("--smoke", action="store_true", help="local 0.5B tiny validation")
