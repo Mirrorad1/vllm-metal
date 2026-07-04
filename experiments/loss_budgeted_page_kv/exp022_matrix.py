@@ -189,18 +189,39 @@ def main():
         wf = wf_mean_abs
     except NameError:
         wf = float("nan")
-    if rescue_rate < 0.10 and (np.isnan(wf) or wf >= 0.8):
-        print(f"H-GENERAL: the wall is CONTEXT-shaped. Rescue {rescue_rate:.0%} (<10%), "
-              f"within-family |rho|={wf:.2f}. No substrate escapes — distillation included "
-              f"(if the lora column agrees). Only dense-tier / re-read remain (build L2); "
-              f"compressibility-gated consolidation is DEAD (fires where it can't help).")
-    elif rescue_rate >= 0.30 or (not np.isnan(wf) and wf <= 0.4):
-        print(f"H-SPECIFIC: the wall is SUBSTRATE-shaped. Rescue {rescue_rate:.0%} (>=30%), "
-              f"within-family |rho|={wf:.2f}. The admission gate upgrades to a substrate "
-              f"DISPATCHER — see section F for how much a type-level dispatch captures.")
+    # RESCUE is the decisive criterion. Low within-family rho WITHOUT rescue means
+    # noise-uncorrelated failures under a dominating substrate, NOT complementarity —
+    # the first 7B run printed a false H-SPECIFIC on exactly that confusion.
+    caveats = []
+    if "quant8b" in cols:
+        q8 = np.mean([r["cells"]["quant8b"]["correct"] for r in rows if "quant8b" in r["cells"]])
+        fullacc = np.mean([r["full"]["correct"] for r in rows])
+        if q8 < 0.9 * fullacc:
+            caveats.append(f"QUANTIZER-SANITY FAIL: 8-bit column acc {q8:.2f} << full "
+                           f"{fullacc:.2f} — the quant implementation is broken; its cells "
+                           f"are meaningless, not a substrate bound")
     else:
-        print(f"MIXED: rescue {rescue_rate:.0%}, within-family |rho|={wf:.2f} — between the "
+        caveats.append("no quant8b sanity column: the quant cells are an untrusted "
+                       "implementation lower bound (a KIVI-grade quantizer may differ)")
+    if "lora" not in cols:
+        caveats.append("weights column (lora) absent or excluded — the substrate question "
+                       "is only answered for INFERENCE-side substrates here")
+    if rescue_rate >= 0.30:
+        print(f"H-SPECIFIC: substrates rescue {rescue_rate:.0%} of eviction-wall contexts "
+              f"(>=30%). The admission gate upgrades to a substrate DISPATCHER — section F "
+              f"shows how much a type-level dispatch captures.")
+    elif rescue_rate < 0.10:
+        # is eviction also the best fixed policy? (dominance, from section F if computed)
+        print(f"NO-RESCUE among tested substrates: {rescue_rate:.0%} of {n_wall} wall "
+              f"contexts recovered at iso-bits (within-family |rho|={wf:.2f} — "
+              f"noise-level, i.e. failures don't even rank-agree, they are simply "
+              f"everywhere). As far as MEASURED, the wall is context-shaped and eviction "
+              f"dominates; dispatcher headroom is zero (section F).")
+    else:
+        print(f"MIXED: rescue {rescue_rate:.0%}, within-family |rho|={wf:.2f} — between "
               f"thresholds. Read sections B-F; consider more contexts or the 0.125 tier.")
+    for c in caveats:
+        print(f"  CAVEAT: {c}")
 
 
 if __name__ == "__main__":

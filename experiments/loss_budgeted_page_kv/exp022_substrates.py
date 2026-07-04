@@ -167,6 +167,33 @@ def quant_bits_ratio(bits, group):
     return (bits + 16.0 / group) / 16.0
 
 
+def kivi_quant(t, bits, kind, group=128):
+    """KIVI-style asymmetric fake-quant: K per-CHANNEL over token groups (Qwen K has huge
+    channel outliers — symmetric per-head_dim-group quant destroys it), V per-TOKEN over
+    channels. Overhead: fp16 scale+zero per group => 32/group bits/elem (K), 32/d (V)."""
+    x = t.float()
+    if kind == "k":
+        b1, h, T, d = x.shape
+        pad = (group - T % group) % group
+        if pad:
+            x = torch.cat([x, x[:, :, -1:, :].expand(b1, h, pad, d)], 2)
+        xg = x.reshape(b1, h, -1, group, d)                 # groups along the TOKEN axis
+        mn, mx = xg.amin(3, keepdim=True), xg.amax(3, keepdim=True)
+        scale = (mx - mn).clamp_min(1e-8) / (2 ** bits - 1)
+        q = ((xg - mn) / scale).round().clamp(0, 2 ** bits - 1)
+        y = (q * scale + mn).reshape(b1, h, -1, d)[:, :, :T]
+    else:
+        mn, mx = x.amin(-1, keepdim=True), x.amax(-1, keepdim=True)
+        scale = (mx - mn).clamp_min(1e-8) / (2 ** bits - 1)
+        q = ((x - mn) / scale).round().clamp(0, 2 ** bits - 1)
+        y = q * scale + mn
+    return y.to(t.dtype)
+
+
+def kivi_bits_ratio(bits, group, d):
+    return (bits + 0.5 * (32.0 / group + 32.0 / d)) / 16.0   # avg of K and V overhead
+
+
 def low_rank(t, r):
     _, h, T, d = t.shape
     xm = t[0].permute(1, 0, 2).reshape(T, h * d).float()
@@ -265,12 +292,15 @@ def run_s23(args, model, tok, device, dtype):
             if key in labels:
                 g_evict_n += 1
                 g_evict_match += int(labels[key] == c)
-        # S2 quantization
-        for bits, group in ((4, 64), (2, 32)):
-            kv_q = [(fake_quant(k, bits, group), fake_quant(v, bits, group)) for k, v in kvs]
+        # S2 quantization (KIVI-style; 8-bit is the SANITY column — must be ~lossless or
+        # the quantizer itself is broken and the 4/2-bit cells mean nothing)
+        hd = kvs[0][0].shape[3]
+        for bits in (8, 4, 2):
+            kv_q = [(kivi_quant(k, bits, "k"), kivi_quant(v, bits, "v")) for k, v in kvs]
             c, nll, _ = answer_metrics(model, kv_q, ids, plen, ans, device)
             rec["cells"][f"quant{bits}b"] = {"correct": bool(c), "nll": nll,
-                                             "bits": quant_bits_ratio(bits, group)}
+                                             "scheme": "kivi",
+                                             "bits": kivi_bits_ratio(bits, 128, hd)}
         # S3 low-rank
         for b in (0.25, 0.125):
             r = rank_for_budget(b, T, D)
