@@ -224,3 +224,25 @@ WIN/MODEST/KILL verdict. Honest notes: 4-way MCQ has a 25% guess floor (break la
 are noised toward safe), and if real benchmark traffic turns out mostly
 sparse-compressible, a small dispatcher win over the best gate is itself the finding
 (benchmark composition, cf. the ETHIC/Dolce line).
+
+---
+
+# exp025 — the dispatcher on RULER (Cut 2b: the standardized benchmark WITH the dense regime)
+
+CWE/FWE (aggregation) + VT + NIAH x2 (retrieval), ~200 items @16k, RULER scoring
+(greedy gen + containment). Tries official HF RULER data (simonjegou/ruler) first,
+falls back loudly to built-in RULER-spec generators. Same L40S recipe, ~1h.
+
+```bash
+cd /workspace/vllm-metal/experiments/loss_budgeted_page_kv
+git pull
+pip install -q datasets
+nohup python exp025_ruler_cuda.py > exp025.log 2>&1 &
+tail -f exp025.log      # [gate g3] first, then the acc ticker; note which data SOURCE printed
+# when [done]:  rm -f exp025_ruler.zip ; runpodctl send results/exp025_ruler
+```
+
+Then locally: `python exp023_dispatch.py --s23 results/exp025_ruler/s23.jsonl --proxy ""`
+Expect: cwe/fwe = the dense regime on a recognized suite (does the wall + quant-rescue +
+dispatcher win replicate?); niah = the sparse contrast; acceptance rate per task tells you
+what 7B can even do at 16k.
