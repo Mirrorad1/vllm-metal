@@ -195,3 +195,32 @@ Verdict line meanings:
 - **H-SPECIFIC** — substrates fail on different contexts: the admission gate upgrades to a
   substrate DISPATCHER (section F shows how much a type-level dispatch captures).
 - **DEGENERATE** — dense families didn't break under eviction: wrong model/scale, not a verdict.
+
+---
+
+# exp024 — the dispatcher on a REGULAR benchmark (LongBench v2, real documents)
+
+Same L40S pod recipe; ~1h; produces the exp022-schema matrix on real LBv2 short-bucket
+items (MCQ, exact scoring) with the 0.5B proxy features embedded, then the exp023
+dispatcher runs on it UNCHANGED — offline, on the Mac.
+
+```bash
+cd /workspace/vllm-metal/experiments/loss_budgeted_page_kv
+git pull
+pip install -q datasets
+nohup python exp024_bench_cuda.py > exp024.log 2>&1 &
+tail -f exp024.log          # gate g1/g3 lines first; then acceptance ticker
+# when [done]: runpodctl send results/exp024_lbv2     (rm old zip first if it complains)
+```
+
+Then locally:
+```bash
+python exp023_dispatch.py --s23 results/exp024_lbv2/s23.jsonl --proxy ""
+```
+
+Read: acceptance rate (7B must solve the item with FULL cache for it to count), the
+quant8b sanity caveat line, the action histogram per DOMAIN, and the same
+WIN/MODEST/KILL verdict. Honest notes: 4-way MCQ has a 25% guess floor (break labels
+are noised toward safe), and if real benchmark traffic turns out mostly
+sparse-compressible, a small dispatcher win over the best gate is itself the finding
+(benchmark composition, cf. the ETHIC/Dolce line).

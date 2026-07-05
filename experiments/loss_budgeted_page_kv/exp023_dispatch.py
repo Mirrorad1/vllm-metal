@@ -77,9 +77,13 @@ def load_matrix(s23_path, proxy_path=None, actions=None):
                 continue
             acts[name] = (0.0 if cell["correct"] else 1.0, float(cell["bits"]))
         r = {"feats": feats, "family": d["family"], "seed": d["seed"], "acts": acts}
-        fp = prox.get((d["family"], d["seed"]))
-        if fp is not None:
-            r["feats_proxy"] = dict(fp, family=d["family"])
+        if "mass_proxy" in d:                      # exp024 embeds proxy mass in-row
+            r["feats_proxy"] = dict(A.features_from_mass(d["mass_proxy"], d["P"], d["plen"]),
+                                    family=d["family"])
+        else:
+            fp = prox.get((d["family"], d["seed"]))
+            if fp is not None:
+                r["feats_proxy"] = dict(fp, family=d["family"])
         rows.append(r)
     return rows
 
@@ -239,6 +243,9 @@ def main():
     rows = [r for r in rows if all(a in r["acts"] for a in args.actions)]
     n_prox = sum(1 for r in rows if "feats_proxy" in r)
     print(f"[load] {len(rows)} accepted contexts; proxy features on {n_prox}")
+    if len(rows) < 40:
+        print(f"NOT EVALUABLE: only {len(rows)} accepted contexts (<40) — no verdict.")
+        return
     print(f"[load] families: {Counter(r['family'] for r in rows)}")
 
     results = {}
