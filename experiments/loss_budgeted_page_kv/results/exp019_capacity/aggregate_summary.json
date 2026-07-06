@@ -1,0 +1,14 @@
+{
+  "model": "llama-3-8b",
+  "kv_pool_gb": 32.0,
+  "pool_blocks": 16384,
+  "quality_budget": 0.25,
+  "iso_quality_concurrency_multiplier_by_ctx": {
+    "2048": 4.0,
+    "8192": 4.0,
+    "32768": 4.0
+  },
+  "mean_iso_quality_multiplier": 4.0,
+  "all_gate_grounding_ok": true,
+  "verdict_reason": "At the iso-quality budget (25%), lossy reclamation fits 4.0\u00d7 more concurrent sequences in the same 32.0GB pool (range 4.0-4.0\u00d7 across contexts) \u2014 i.e. up to ~4.0\u00d7 aggregate decode throughput while compute-headroom remains. Gain SATURATES at small budgets due to the always-keep floor, and SHRINKS with large shared prefixes (unreclaimable). The shipped safety gate correctly excludes shared-prefix blocks from reclamation (grounding ok=True)."
+}

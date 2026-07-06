@@ -1,3 +1,10 @@
+
+source ~/Projects/vllm-metal/.venv-vllm-metal/bin/activate
+export VLLM_METAL_BUILD_FROM_SOURCE=1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --max-model-len 4096
+
+
+
 # vLLM Metal Plugin
 
 > **High-performance LLM inference on Apple Silicon using MLX and vLLM**

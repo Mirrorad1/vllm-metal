@@ -450,9 +450,22 @@ def sdpa_forward(
     v_3d = mx.contiguous(values[0].transpose(1, 0, 2).astype(kv_cache.dtype))
 
     slot_mapping = mx.array(ctx.slot_mapping, dtype=mx.int64)
-    seq_lens = mx.array(ctx.context_lens, dtype=mx.int32)
+
+    # --- Belief-gated paged attention (experimental, default off) ---
+    # Rewrites the per-sequence block table + context length for the decode
+    # attention READ only (slot_mapping / KV writes above are untouched). Exact
+    # no-op unless VLLM_METAL_BELIEF_PAGED_ATTENTION=1 and a selector is
+    # registered. See vllm_metal/attention/belief_gate.py.
+    from vllm_metal.attention import belief_gate
+
+    gated_block_tables, gated_context_lens = belief_gate.apply_gate(
+        ctx.block_tables, ctx.context_lens, ctx.num_decode_requests,
+        kv_cache.block_size,
+    )
+
+    seq_lens = mx.array(gated_context_lens, dtype=mx.int32)
     cu_seqlens_q = mx.array(ctx.cu_seqlens, dtype=mx.int32)
-    max_seq_len = max(ctx.context_lens)
+    max_seq_len = max(gated_context_lens)
 
     # --- Block tables (with hybrid block-size translation) ---
     # vLLM may inflate block_size (e.g. 544) to align attention pages with
@@ -461,7 +474,7 @@ def sdpa_forward(
     # it expands each vLLM block into multiple kernel blocks and returns the
     # kernel-compatible block_size.  The cache is reshaped to match (zero-copy).
     block_tables, kernel_block_size = _build_block_tables(
-        ctx.block_tables, kv_cache.block_size
+        gated_block_tables, kv_cache.block_size
     )
 
     if shared_kv is not None or read_existing_kv:

@@ -1,0 +1,32 @@
+{
+  "n": 40,
+  "d": 64,
+  "eff_rank_K": 40.26327233626638,
+  "eff_rank_V": 48.335789124745695,
+  "stable_rank_K": 1.906628460353982,
+  "stable_rank_V": 4.490963592252944,
+  "S_acc": 1.0,
+  "S_kl": 0.00015179954978066944,
+  "F_acc": 0.0,
+  "F_kl": 7.819508184551656,
+  "r_eq": 4,
+  "sel_bytes_frac": 0.05878542823673143,
+  "stack_acc_by_rank": {
+    "64": 1.0,
+    "48": 1.0,
+    "32": 1.0,
+    "24": 1.0,
+    "16": 0.95,
+    "12": 0.4,
+    "8": 0.0,
+    "4": 0.0,
+    "2": 0.0,
+    "1": 0.0
+  },
+  "rstar_median": 16.0,
+  "rstar_mean": 14.8,
+  "stack_byte_multiplier": 0.25,
+  "F_vs_S_competitive": false,
+  "verdict": "SPARSITY-DOMINANT + modest low-rank stack (partially fillable)",
+  "verdict_reason": "At equal bytes, TOKEN-SELECTION beats global low-rank (S_acc 1.00 vs F_acc 0.00, r_eq=4): the dominant redundancy is token-SPARSITY, which existing eviction already harvests. BUT the answer tolerates low-rank to r*\u224816 (0.25\u00d7 of d) STACKED on selection \u2014 a modest, real low-rank byte lever (V eff-rank 48.3/64). So the new lacuna is PARTIALLY fillable: a smear-aware low-rank reclaimer composes with eviction for ~4.0\u00d7 extra, but is the secondary lever, not the dominant one. This reproduces from first principles WHY the field stacks eviction\u00d7quant\u00d7low-rank: orthogonal redundancy structures."
+}

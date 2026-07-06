@@ -1,0 +1,17 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "n": 15,
+  "n_calib": 8,
+  "n_filler": 210,
+  "rank_grid": [
+    64,
+    48,
+    32,
+    24,
+    16,
+    12,
+    8,
+    4
+  ],
+  "out": "/Users/mirro/Projects/vllm-metal/experiments/loss_budgeted_page_kv/results/exp016_universal"
+}

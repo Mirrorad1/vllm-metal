@@ -1,0 +1,8 @@
+{
+  "kind": "baselines",
+  "policies": [
+    "recent_pages",
+    "seeded_random_pages",
+    "sink_recent_pages"
+  ]
+}

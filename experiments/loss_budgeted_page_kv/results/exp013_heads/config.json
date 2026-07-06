@@ -1,0 +1,16 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "n": 30,
+  "n_filler": 210,
+  "head_budgets": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32,
+    48
+  ],
+  "out": "/Users/mirro/Projects/vllm-metal/experiments/loss_budgeted_page_kv/results/exp013_heads"
+}

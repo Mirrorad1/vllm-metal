@@ -1,0 +1,22 @@
+{
+  "n": 20,
+  "n_units": 336,
+  "single_flip_rate_mean": 0.0,
+  "max_single_dlp_mean": 0.0037191136437571574,
+  "top5_dlp_sum_mean": 0.007113211442332995,
+  "frac_dlp_gt0.5_mean": 0.0,
+  "budget_acc": {
+    "1": 0.0,
+    "2": 0.0,
+    "4": 0.0,
+    "8": 0.0,
+    "16": 0.0,
+    "32": 0.25,
+    "64": 0.3,
+    "128": 0.6,
+    "256": 1.0
+  },
+  "qhead_kstar_0.9": 256,
+  "verdict": "HOLOGRAPHIC LOCKED (no sparse latent unit at ANY granularity)",
+  "verdict_reason": "even at the finest latent unit (individual query-head), single-head flip rate 0.00% and max \u0394logp 0.00 nat \u2014 no q-head is load-bearing, mirroring pages and kv-heads. The answer is HOLOGRAPHICALLY distributed across token \u00d7 head \u00d7 layer; cross-layer redundancy dominates. No sparse latent unit exists for any operator to target. The 'true lacuna through hidden latent states' search returns NULL \u2014 the latent states hide no exploitable sparse structure beyond the modest 4\u00d7 low-rank (exp012). The ONLY genuinely-empty cell is SYSTEMS: physical reclamation of dropped/factored bytes."
+}

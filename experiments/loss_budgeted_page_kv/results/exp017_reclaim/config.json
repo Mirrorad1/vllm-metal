@@ -1,0 +1,20 @@
+{
+  "n_layers": 24,
+  "n_kv": 2,
+  "n_q": 14,
+  "head_dim": 64,
+  "block_size": 16,
+  "contexts": [
+    2048,
+    4096,
+    8192,
+    16384
+  ],
+  "budgets": [
+    0.5,
+    0.25,
+    0.125,
+    0.0625
+  ],
+  "out": "/Users/mirro/Projects/vllm-metal/experiments/loss_budgeted_page_kv/results/exp017_reclaim"
+}

@@ -1,0 +1,166 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "iso_thresh": 0.9,
+  "by_family": {
+    "single_needle": {
+      "full_acc": 1.0,
+      "iso_quality_budget": 1.0,
+      "capacity_multiplier_at_iso": 1.0,
+      "per_budget": {
+        "1.0": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.5": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.25": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.125": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.0625": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        }
+      }
+    },
+    "exact_long_string": {
+      "full_acc": 1.0,
+      "iso_quality_budget": 1.0,
+      "capacity_multiplier_at_iso": 1.0,
+      "per_budget": {
+        "1.0": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.5": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.25": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.125": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.0625": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        }
+      }
+    },
+    "multi_needle": {
+      "full_acc": 1.0,
+      "iso_quality_budget": 1.0,
+      "capacity_multiplier_at_iso": 1.0,
+      "per_budget": {
+        "1.0": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.5": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.25": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.125": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.0625": {
+          "attention_acc": 1.0,
+          "recent_acc": 0.0,
+          "n": 20
+        }
+      }
+    },
+    "multi_hop": {
+      "full_acc": 1.0,
+      "iso_quality_budget": 1.0,
+      "capacity_multiplier_at_iso": 1.0,
+      "per_budget": {
+        "1.0": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.5": {
+          "attention_acc": 0.95,
+          "recent_acc": 0.95,
+          "n": 20
+        },
+        "0.25": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.125": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.0625": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        }
+      }
+    },
+    "distractor": {
+      "full_acc": 1.0,
+      "iso_quality_budget": 1.0,
+      "capacity_multiplier_at_iso": 1.0,
+      "per_budget": {
+        "1.0": {
+          "attention_acc": 1.0,
+          "recent_acc": 1.0,
+          "n": 20
+        },
+        "0.5": {
+          "attention_acc": 0.95,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.25": {
+          "attention_acc": 0.95,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.125": {
+          "attention_acc": 0.9,
+          "recent_acc": 0.0,
+          "n": 20
+        },
+        "0.0625": {
+          "attention_acc": 0.75,
+          "recent_acc": 0.0,
+          "n": 20
+        }
+      }
+    }
+  }
+}

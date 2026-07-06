@@ -1,0 +1,29 @@
+{
+  "n": 15,
+  "n_calib": 8,
+  "d": 64,
+  "universal_acc_by_rank": {
+    "64": 1.0,
+    "48": 1.0,
+    "32": 1.0,
+    "24": 0.0,
+    "16": 0.0,
+    "12": 0.0,
+    "8": 0.0,
+    "4": 0.0
+  },
+  "perexample_acc_by_rank": {
+    "64": 1.0,
+    "48": 1.0,
+    "32": 0.8666666666666667,
+    "24": 0.0,
+    "16": 0.0,
+    "12": 0.0,
+    "8": 0.0,
+    "4": 0.0
+  },
+  "universal_rstar_0.9": 32,
+  "perexample_rstar_0.9": 48,
+  "verdict": "UNIVERSAL latent subspace EXISTS (static codebook lever)",
+  "verdict_reason": "a FIXED cross-prompt basis preserves answers at rank 32 \u2014 about the same as the per-prompt rank 48 (ratio 0.7\u00d7). The low-rank KV structure is SHARED across prompts: a fit-once universal codebook of rank ~32/64 is a real static latent lever (beyond per-prompt low-rank). This is a genuine hidden-latent structure."
+}

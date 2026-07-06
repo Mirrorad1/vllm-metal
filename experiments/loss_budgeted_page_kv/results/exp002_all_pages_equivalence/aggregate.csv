@@ -1,0 +1,2 @@
+policy,budget_fraction,n,D_h_mean,D_h_ci95,answer_acc_mean,answer_acc_ci95,top1_mean,J_mean,controller_ms_mean
+full_pages,1.0,43,0.0,0.0,1.0,0.0,1.0,75.23255813953489,0.036035783502251596

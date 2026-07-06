@@ -1,0 +1,8 @@
+{
+  "n_cells": 16,
+  "mean_reclaim_ratio": 1.0,
+  "worst_transient_peak_x": 1.5000101725260417,
+  "kernel_equivalence_ok": true,
+  "verdict": "PHYSICAL RECLAMATION REAL (memory actually freed ~J/P)",
+  "verdict_reason": "compaction physically frees memory at reclaim_ratio 1.00 (actual/would-be \u2248 1): active memory drops \u2248 the logical fraction (J/P). Correctness holds (kernel eq < 5e-3). COSTS: transient peak up to 1.50\u00d7 full during the gather (you need full+compact live briefly \u2014 so reclamation must be staged or done layer-by-layer to avoid an OOM spike), and a compaction copy of a few ms. So the SYSTEMS lacuna is BUILDABLE in this stack: MLX frees the bytes. The remaining gap is purely the SAFETY integration (refcount/prefix/CoW) inside the live vLLM allocator \u2014 engineering, not a research unknown."
+}
